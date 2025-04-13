@@ -13,6 +13,8 @@ from deepface import DeepFace
 from pathlib import Path
 from typing import List
 import imghdr
+import requests
+from tqdm import tqdm
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +30,8 @@ app = FastAPI(
 # Configuration
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'bmp'}
 UPLOAD_FOLDER = '/tmp/uploads'
-MODEL_DIR = '/app/model'  # Absolute path in container
+MODEL_DIR = '/app/model'
+MODEL_URL = 'https://drive.google.com/uc?export=download&id=1sUNdQHfqKBCW44wGEi158W2DK71g0BZE'
 MODEL_PATH = os.path.join(MODEL_DIR, 'final_model_11_4_2025.keras')
 
 # Ensure directories exist
@@ -51,6 +54,40 @@ class PredictionResult(BaseModel):
 class HealthCheck(BaseModel):
     status: str
     model_loaded: bool
+
+def download_model(url: str, destination: str) -> None:
+    """Download model from URL with progress bar and verification"""
+    try:
+        session = requests.Session()
+        response = session.get(url, stream=True)
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        block_size = 1024 * 1024  # 1MB
+        
+        with open(destination, 'wb') as file:
+            for data in tqdm(response.iter_content(block_size), 
+                           total=total_size//block_size, 
+                           unit='MB', 
+                           unit_scale=True,
+                           desc=f"Downloading model"):
+                file.write(data)
+        
+        # Verify download
+        if os.path.getsize(destination) < 1000000:  # 1MB minimum expected size
+            raise ValueError("Downloaded file is too small, likely corrupted")
+            
+        with open(destination, 'rb') as f:
+            header = f.read(4)
+            if header != b'PK\x03\x04':
+                raise ValueError("Downloaded file is not a valid Keras model")
+                
+        logger.info(f"Model successfully downloaded to {destination}")
+    except Exception as e:
+        logger.error(f"Model download failed: {str(e)}")
+        if os.path.exists(destination):
+            os.remove(destination)
+        raise
 
 # 1. Image Validator
 def is_valid_image_file(filepath: str) -> bool:
@@ -182,15 +219,26 @@ class FixedHybridBlock(layers.Layer):
 
 # 4. Model Loading with Verification
 def load_custom_model(model_path: str) -> tf.keras.Model:
-    logger.info(f"Attempting to load model from: {model_path}")
-    logger.info(f"File exists: {os.path.exists(model_path)}")
+    # Check if model exists, download if not
+    if not os.path.exists(model_path):
+        logger.info("Model not found locally, downloading...")
+        try:
+            download_model(MODEL_URL, model_path)
+        except Exception as e:
+            logger.error(f"Model download failed: {str(e)}")
+            raise RuntimeError("Failed to download model")
+
+    logger.info(f"Loading model from: {model_path}")
+    logger.info(f"File size: {os.path.getsize(model_path)} bytes")
     
-    # Verify file integrity first
+    # Verify file integrity
     try:
         with open(model_path, 'rb') as f:
             header = f.read(4)
-            if header != b'PK\x03\x04':  # Zip file header
-                raise ValueError("File is not a valid Keras model (missing zip header)")
+            if header != b'PK\x03\x04':
+                logger.error("Invalid model file header, attempting to redownload...")
+                os.remove(model_path)
+                download_model(MODEL_URL, model_path)
     except Exception as e:
         logger.error(f"Model file verification failed: {str(e)}")
         raise
@@ -202,30 +250,28 @@ def load_custom_model(model_path: str) -> tf.keras.Model:
     }
     
     try:
-        # Try loading with different approaches
-        try:
-            model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
-        except:
-            # Fallback for different file formats
-            model = tf.keras.models.load_model(
-                model_path,
-                custom_objects=custom_objects,
-                compile=False
-            )
+        model = tf.keras.models.load_model(
+            model_path,
+            custom_objects=custom_objects,
+            compile=False
+        )
         logger.info("Model loaded successfully")
         return model
     except Exception as e:
         logger.error(f"Model loading failed: {str(e)}")
-        raise
-
+        # Attempt to redownload if loading fails
+        logger.info("Attempting to redownload model...")
+        os.remove(model_path)
+        download_model(MODEL_URL, model_path)
+        return tf.keras.models.load_model(
+            model_path,
+            custom_objects=custom_objects,
+            compile=False
+        )
 
 # Initialize components
 cropper = FaceCropper()
-try:
-    model = load_custom_model(MODEL_PATH)
-except Exception as e:
-    logger.error(f"Failed to initialize model: {str(e)}")
-    raise
+model = load_custom_model(MODEL_PATH)
 
 # 5. Image Processing
 def preprocess_images(image_paths: List[str], target_size: tuple = (224, 224)) -> tuple:
