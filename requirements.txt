@@ -4,35 +4,36 @@ uvicorn==0.29.0
 gunicorn==23.0.0
 python-multipart==0.0.9
 pydantic==2.7.1
-pydantic-settings==2.2.1  # For better config management
+pydantic-settings==2.2.1
 
-# Deep Learning
-tensorflow-cpu==2.16.1  # Updated to latest stable version
-keras==2.16.0  # Explicitly specify Keras version
+# TensorFlow and Keras
+tensorflow-cpu==2.14.0  # Downgraded to stable version
+keras==2.14.0  # Matching version with TensorFlow
+
+# DeepFace
 deepface==0.0.93
-h5py==3.11.0  # Required for model loading
 
 # Image Processing
-opencv-python-headless==4.9.0.80  # Updated to stable version
-pillow==10.3.0  # More stable version
+opencv-python-headless==4.8.0.76  # Stable version
+pillow==10.2.0  # Compatible version
 
 # Numerical Computing
-numpy==1.26.4
-pandas==2.2.2  # Often needed for data processing
+numpy==1.24.4  # Version known to work with TF 2.14
+pandas==2.1.4
 
 # Protocol Buffers
-protobuf==4.25.3  # Updated version
+protobuf==3.20.3  # Compatible version
 
 # ASGI Server
 httptools==0.6.1
 uvloop==0.19.0
-click==8.1.7  # Required by uvicorn
+click==8.1.7
 
 # Runtime Dependencies
 python-dotenv==1.0.1
-requests==2.31.0  # For potential HTTP requests
-tqdm==4.66.2  # For progress bars
+requests==2.31.0
+tqdm==4.66.1
 
-# Additional Utilities
-loguru==0.7.2  # Better logging
-typing-extensions==4.11.0  # For better type hints
+# Utilities
+loguru==0.7.2
+typing-extensions==4.8.0
