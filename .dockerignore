@@ -1,6 +1,8 @@
+.git
+.gitattributes
+__pycache__/
 *.pyc
-__pycache__
-*.swp
+*.pyo
+*.pyd
+*.DS_Store
 .env
-.git/
-.gitignore
