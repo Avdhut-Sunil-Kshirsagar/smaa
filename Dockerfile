@@ -1,7 +1,8 @@
 FROM python:3.9-slim
 
-# 1. Create non-root user with UID in Choreo's required range (10000-20000)
+# 1. Create non-root user and /app directory
 RUN useradd -u 10014 -m appuser && \
+    mkdir -p /app && \
     chown -R appuser:appuser /app
 
 # 2. Install system dependencies
@@ -10,16 +11,17 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# 3. Set working directory
 WORKDIR /app
 
-# 3. Copy requirements with proper permissions
-COPY --chown=appuser:appuser requirements.txt .
+# 4. Copy requirements.txt first to leverage Docker layer caching
+COPY --chown=appuser:appuser requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. Copy application code
+# 5. Copy the rest of the app (including app.py, model folder, etc.)
 COPY --chown=appuser:appuser . .
 
-# 5. Switch to non-root user (with approved UID)
+# 6. Switch to non-root user
 USER 10014
 
 EXPOSE 5000
