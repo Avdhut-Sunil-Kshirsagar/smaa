@@ -12,34 +12,38 @@ RUN useradd -u 10014 -m appuser && \
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
-    wget \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 3. Upgrade pip and install Python dependencies
+# 3. Copy requirements and install
 COPY --chown=10014:10014 requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. Download model during build
-RUN wget --quiet --show-progress --no-check-certificate \
-    "https://drive.google.com/uc?export=download&id=1sUNdQHfqKBCW44wGEi158W2DK71g0BZE" \
-    -O /app/model/final_model_11_4_2025.keras && \
-    chown 10014:10014 /app/model/final_model_11_4_2025.keras && \
-    echo "Model size: $(du -h /app/model/final_model_11_4_2025.keras | cut -f1)"
+# 4. Copy model and verify it
+COPY --chown=10014:10014 model/ /app/model/
+RUN python3 -c "
+import tensorflow as tf
+import os
+print(f'Model file size: {os.path.getsize(\"/app/model/final_model_11_4_2025.keras\")} bytes')
+try:
+    model = tf.keras.models.load_model('/app/model/final_model_11_4_2025.keras')
+    print('Model verification passed!')
+    model.summary()
+except Exception as e:
+    print(f'Model verification failed: {str(e)}')
+    raise
+"
 
 # 5. Copy application code
 COPY --chown=10014:10014 . .
 
-# 6. Set environment variables
+# 6. Environment variables
 ENV MODEL_PATH=/app/model/final_model_11_4_2025.keras
 ENV DEEPFACE_HOME=/tmp/.deepface
 ENV UPLOAD_FOLDER=/tmp/uploads
 
-# 7. Use non-root user and expose port
+# 7. Runtime configuration
 USER 10014
 EXPOSE 8000
-
-# 8. Run the FastAPI app with Gunicorn + Uvicorn worker
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "-k", "uvicorn.workers.UvicornWorker", "app:app"]
