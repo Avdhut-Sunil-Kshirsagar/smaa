@@ -10,11 +10,8 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from tensorflow.keras import layers, models
 from deepface import DeepFace
-from pathlib import Path
 from typing import List
 import imghdr
-import requests
-from tqdm import tqdm
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -29,14 +26,11 @@ app = FastAPI(
 
 # Configuration
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'bmp'}
-UPLOAD_FOLDER = '/tmp/uploads'
-MODEL_DIR = '/app/model'
-MODEL_URL = 'https://drive.google.com/uc?export=download&id=1sUNdQHfqKBCW44wGEi158W2DK71g0BZE'
-MODEL_PATH = os.getenv('MODEL_PATH', os.path.join(MODEL_DIR, 'final_model_11_4_2025.keras'))
+UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', '/tmp/uploads')
+MODEL_PATH = os.getenv('MODEL_PATH', '/app/model/final_model_11_4_2025.keras')
 
-# Ensure directories exist
+# Ensure upload directory exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True)
 
 # Configure TensorFlow
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -54,53 +48,6 @@ class PredictionResult(BaseModel):
 class HealthCheck(BaseModel):
     status: str
     model_loaded: bool
-
-def download_model() -> None:
-    """Download model if it doesn't exist"""
-    if os.path.exists(MODEL_PATH):
-        return
-        
-    logger.info("Downloading model...")
-    try:
-        response = requests.get(MODEL_URL, stream=True)
-        response.raise_for_status()
-        
-        total_size = int(response.headers.get('content-length', 0))
-        block_size = 1024 * 1024  # 1MB
-        
-        with open(MODEL_PATH, 'wb') as file:
-            for data in tqdm(response.iter_content(block_size), 
-                           total=total_size//block_size, 
-                           unit='MB', 
-                           unit_scale=True,
-                           desc="Downloading model"):
-                file.write(data)
-                
-        logger.info(f"Model downloaded to {MODEL_PATH}")
-    except Exception as e:
-        logger.error(f"Model download failed: {str(e)}")
-        raise
-
-def load_model() -> tf.keras.Model:
-    """Load model with custom objects"""
-    if not os.path.exists(MODEL_PATH):
-        download_model()
-    
-    custom_objects = {
-        'EfficientChannelAttention': EfficientChannelAttention,
-        'FixedSpatialAttention': FixedSpatialAttention,
-        'FixedHybridBlock': FixedHybridBlock
-    }
-    
-    try:
-        return tf.keras.models.load_model(
-            MODEL_PATH,
-            custom_objects=custom_objects,
-            compile=False
-        )
-    except Exception as e:
-        logger.error(f"Model loading failed: {str(e)}")
-        raise
 
 # 1. Image Validator
 def is_valid_image_file(filepath: str) -> bool:
@@ -237,7 +184,17 @@ model = None
 @app.on_event("startup")
 async def startup_event():
     global model
-    model = load_model()
+    try:
+        custom_objects = {
+            'EfficientChannelAttention': EfficientChannelAttention,
+            'FixedSpatialAttention': FixedSpatialAttention,
+            'FixedHybridBlock': FixedHybridBlock
+        }
+        model = tf.keras.models.load_model(MODEL_PATH, custom_objects=custom_objects, compile=False)
+        logger.info("Model loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load model: {str(e)}")
+        raise RuntimeError(f"Model loading failed: {str(e)}")
 
 # 4. Image Processing
 def preprocess_images(image_paths: List[str], target_size: tuple = (224, 224)) -> tuple:
@@ -304,7 +261,7 @@ async def predict(file: UploadFile = File(...)):
 async def health_check():
     return {
         "status": "API is running",
-        "model_loaded": os.path.exists(MODEL_PATH)
+        "model_loaded": model is not None
     }
 
 if __name__ == "__main__":
