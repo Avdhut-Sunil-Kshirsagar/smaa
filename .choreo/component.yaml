@@ -1,0 +1,9 @@
+component:
+  name: image-classifier-api
+  type: web
+  build:
+    context: .
+    dockerfile: Dockerfile
+  ports:
+    - containerPort: 5000  # Must match your Flask app's port
+      servicePort: 80      # External port
