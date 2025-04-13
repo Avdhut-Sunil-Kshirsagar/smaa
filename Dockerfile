@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # 3. Upgrade pip and install Python dependencies
-COPY --chown=appuser:appuser requirements.txt .
+COPY --chown=10014:10014 requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
@@ -27,7 +27,7 @@ RUN wget --load-cookies /tmp/cookies.txt \
     "https://docs.google.com/uc?export=download&confirm=$(wget --quiet --save-cookies /tmp/cookies.txt --keep-session-cookies --no-check-certificate 'https://docs.google.com/uc?export=download&id=1sUNdQHfqKBCW44wGEi158W2DK71g0BZE' -O- | sed -rn 's/.*confirm=([0-9A-Za-z_]+).*/\1\n/p')&id=1sUNdQHfqKBCW44wGEi158W2DK71g0BZE" \
     -O /app/model/final_model_11_4_2025.keras && \
     rm -rf /tmp/cookies.txt && \
-    chown appuser:appuser /app/model/final_model_11_4_2025.keras
+    chown 10014:10014 /app/model/final_model_11_4_2025.keras
 
 # 5. Create and verify the model file
 RUN cat <<EOF > verify_model.py
@@ -48,7 +48,7 @@ EOF
 RUN python verify_model.py && rm verify_model.py
 
 # 7. Copy the rest of the application
-COPY --chown=appuser:appuser . .
+COPY --chown=10014:10014 . .
 
 # 8. Set environment variables
 ENV MODEL_PATH=/app/model/final_model_11_4_2025.keras
@@ -56,7 +56,7 @@ ENV DEEPFACE_HOME=/tmp/.deepface
 ENV UPLOAD_FOLDER=/tmp/uploads
 
 # 9. Use non-root user and expose port
-USER appuser
+USER 10014
 EXPOSE 8000
 
 # 10. Run the FastAPI app with Gunicorn + Uvicorn worker
