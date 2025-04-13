@@ -185,9 +185,16 @@ def load_custom_model(model_path: str) -> tf.keras.Model:
     logger.info(f"Attempting to load model from: {model_path}")
     logger.info(f"File exists: {os.path.exists(model_path)}")
     
-    if not Path(model_path).exists():
-        raise FileNotFoundError(f"Model file missing at {model_path}")
-    
+    # Verify file integrity first
+    try:
+        with open(model_path, 'rb') as f:
+            header = f.read(4)
+            if header != b'PK\x03\x04':  # Zip file header
+                raise ValueError("File is not a valid Keras model (missing zip header)")
+    except Exception as e:
+        logger.error(f"Model file verification failed: {str(e)}")
+        raise
+
     custom_objects = {
         'EfficientChannelAttention': EfficientChannelAttention,
         'FixedSpatialAttention': FixedSpatialAttention,
@@ -195,12 +202,22 @@ def load_custom_model(model_path: str) -> tf.keras.Model:
     }
     
     try:
-        model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
+        # Try loading with different approaches
+        try:
+            model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
+        except:
+            # Fallback for different file formats
+            model = tf.keras.models.load_model(
+                model_path,
+                custom_objects=custom_objects,
+                compile=False
+            )
         logger.info("Model loaded successfully")
         return model
     except Exception as e:
         logger.error(f"Model loading failed: {str(e)}")
         raise
+
 
 # Initialize components
 cropper = FaceCropper()
