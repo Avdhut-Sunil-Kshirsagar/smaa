@@ -20,7 +20,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # 5. Env vars
 ENV DEEPFACE_HOME=/tmp/.deepface
 ENV UPLOAD_FOLDER=/tmp/uploads
-ENV MODEL_PATH=/app/model/final_model_11_4_2025.keras
+ENV MODEL_PATH=/tmp/model/final_model_11_4_2025.keras
+
 
 USER 10014
 EXPOSE 8000
