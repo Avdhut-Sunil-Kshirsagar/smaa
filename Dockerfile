@@ -31,17 +31,25 @@ RUN wget --load-cookies /tmp/cookies.txt \
 
 # 5. Create and verify the model file
 RUN cat <<EOF > verify_model.py
+import os
 import tensorflow as tf
+
+print("Verifying model file...")
 print("Model file exists:", tf.io.gfile.exists("/app/model/final_model_11_4_2025.keras"))
 print("File size:", os.path.getsize("/app/model/final_model_11_4_2025.keras"))
+
 try:
     with open("/app/model/final_model_11_4_2025.keras", "rb") as f:
         header = f.read(4)
         print("File header:", header)
         assert header == b'PK\x03\x04', "Invalid Keras model file header"
     print("Basic file verification passed")
+    
+    # Skip actual model loading in build stage to keep image smaller
+    print("Skipping full model load during build (will load at runtime)")
 except Exception as e:
     print(f"File verification failed: {str(e)}")
+    raise
 EOF
 
 # 6. Run model verification
