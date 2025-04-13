@@ -28,7 +28,7 @@ app = FastAPI(
 # Configuration
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'bmp'}
 UPLOAD_FOLDER = '/tmp/uploads'
-MODEL_DIR = os.path.join(os.path.dirname(__file__), 'model')
+MODEL_DIR = '/app/model'  # Absolute path in container
 MODEL_PATH = os.path.join(MODEL_DIR, 'final_model_11_4_2025.keras')
 
 # Ensure directories exist
@@ -94,9 +94,7 @@ class FaceCropper:
             logger.error(f"Cropping error: {e}")
             return np.zeros((*target_size, 3), dtype=np.float32)
 
-
-
-# 3. Attention Modules (unchanged from your original)   
+# 3. Attention Modules   
 class EfficientChannelAttention(layers.Layer):
     def __init__(self, channels, reduction=8, **kwargs):
         super().__init__(**kwargs)
@@ -182,11 +180,11 @@ class FixedHybridBlock(layers.Layer):
         })
         return config
 
-
-
-
 # 4. Model Loading with Verification
 def load_custom_model(model_path: str) -> tf.keras.Model:
+    logger.info(f"Attempting to load model from: {model_path}")
+    logger.info(f"File exists: {os.path.exists(model_path)}")
+    
     if not Path(model_path).exists():
         raise FileNotFoundError(f"Model file missing at {model_path}")
     
@@ -196,7 +194,6 @@ def load_custom_model(model_path: str) -> tf.keras.Model:
         'FixedHybridBlock': FixedHybridBlock
     }
     
-    logger.info("Loading model...")
     try:
         model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
         logger.info("Model loaded successfully")
@@ -207,7 +204,11 @@ def load_custom_model(model_path: str) -> tf.keras.Model:
 
 # Initialize components
 cropper = FaceCropper()
-model = load_custom_model(MODEL_PATH)
+try:
+    model = load_custom_model(MODEL_PATH)
+except Exception as e:
+    logger.error(f"Failed to initialize model: {str(e)}")
+    raise
 
 # 5. Image Processing
 def preprocess_images(image_paths: List[str], target_size: tuple = (224, 224)) -> tuple:
@@ -229,6 +230,7 @@ def preprocess_images(image_paths: List[str], target_size: tuple = (224, 224)) -
 # API Endpoints
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(file: UploadFile = File(...)):
+    file_path = None
     try:
         # Validate file
         if not file.filename.lower().endswith(tuple(ALLOWED_EXTENSIONS)):
@@ -266,57 +268,10 @@ async def predict(file: UploadFile = File(...)):
     
     finally:
         # Cleanup
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
-@app.post("/batch_predict", response_model=List[PredictionResult])
-async def batch_predict(files: List[UploadFile] = File(...)):
-    saved_paths = []
-    try:
-        # Validate and save files
-        for file in files:
-            if not file.filename.lower().endswith(tuple(ALLOWED_EXTENSIONS)):
-                raise HTTPException(status_code=400, detail=f"Invalid file type: {file.filename}")
-            
-            file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-            with open(file_path, "wb") as buffer:
-                buffer.write(await file.read())
-            
-            if not is_valid_image_file(file_path):
-                raise HTTPException(status_code=400, detail=f"Invalid image file: {file.filename}")
-            
-            saved_paths.append(file_path)
-        
-        # Process and predict
-        full_imgs, face_imgs = preprocess_images(saved_paths)
-        predictions = model.predict([full_imgs, face_imgs])
-        
-        results = []
-        for i, path in enumerate(saved_paths):
-            results.append({
-                "image": os.path.basename(path),
-                "predicted_class": ['AI', 'FAKE', 'REAL'][np.argmax(predictions[i])],
-                "confidence": float(np.max(predictions[i])),
-                "probabilities": {
-                    'AI': float(predictions[i][0]),
-                    'FAKE': float(predictions[i][1]),
-                    'REAL': float(predictions[i][2])
-                }
-            })
-        
-        return results
-    
-    except Exception as e:
-        logger.error(f"Batch prediction error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-    
-    finally:
-        # Cleanup
-        for path in saved_paths:
-            if os.path.exists(path):
-                os.remove(path)
-
-@app.get("/", response_model=HealthCheck)
+@app.get("/health", response_model=HealthCheck)
 async def health_check():
     return {
         "status": "API is running",
