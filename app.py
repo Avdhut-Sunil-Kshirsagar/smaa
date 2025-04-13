@@ -5,38 +5,29 @@ import logging
 import cv2
 import numpy as np
 import tensorflow as tf
-from pydantic import BaseModel
+import requests
+from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import List
 from tensorflow.keras import layers, models
 from deepface import DeepFace
-from typing import List
 import imghdr
 
-# Configure logging
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="Image Classification API",
-    description="API for detecting AI-generated, fake, or real images",
-    version="1.0.0"
-)
+# FastAPI App
+app = FastAPI(title="Image Classification API")
 
-# Configuration
-ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'bmp'}
-UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', '/tmp/uploads')
-MODEL_PATH = os.getenv('MODEL_PATH', '/app/model/final_model_11_4_2025.keras')
-
-# Ensure upload directory exists
+# Paths & Constants
+MODEL_PATH = "/app/model/final_model_11_4_2025.keras"
+MODEL_URL = "https://www.googleapis.com/drive/v3/files/1sUNdQHfqKBCW44wGEi158W2DK71g0BZE?alt=media&key=AIzaSyAQWd9J7XainNo1hx3cUzJsklrK-wm9Sng"
+UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-# Configure TensorFlow
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '1'
-policy = tf.keras.mixed_precision.Policy('mixed_float16')
-tf.keras.mixed_precision.set_global_policy(policy)
+os.makedirs('/tmp/.deepface', exist_ok=True)
+os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
 
 # Response Models
 class PredictionResult(BaseModel):
@@ -49,96 +40,51 @@ class HealthCheck(BaseModel):
     status: str
     model_loaded: bool
 
-# 1. Image Validator
-def is_valid_image_file(filepath: str) -> bool:
-    try:
-        ext = os.path.splitext(filepath)[1].lower()[1:]
-        if ext not in ALLOWED_EXTENSIONS:
-            return False
-        
-        img_type = imghdr.what(filepath)
-        if img_type not in ['jpeg', 'png', 'bmp']:
-            return False
-            
-        img = cv2.imread(filepath)
-        return img is not None
-    except Exception as e:
-        logger.error(f"Image validation error: {str(e)}")
-        return False
+# Download Model
+def download_model_if_needed():
+    if not Path(MODEL_PATH).exists():
+        logger.info("Downloading model...")
+        response = requests.get(MODEL_URL)
+        if response.status_code != 200:
+            raise RuntimeError("Model download failed")
+        with open(MODEL_PATH, "wb") as f:
+            f.write(response.content)
+        logger.info("Model downloaded and saved")
 
-# 2. Face Cropper Class
-class FaceCropper:
-    def __init__(self):
-        logger.info("DeepFace initialized")
-
-    def safe_crop(self, image_path: str, target_size: tuple = (224, 224)) -> np.ndarray:
-        try:
-            faces = DeepFace.extract_faces(
-                image_path, 
-                detector_backend='opencv', 
-                enforce_detection=False
-            )
-            
-            if len(faces) == 0:
-                logger.info("Using full image as fallback")
-                img = cv2.imread(image_path)
-                return cv2.resize(img, target_size)
-            
-            face = faces[0]['face']
-            resized = cv2.resize(face, target_size)
-            return resized if resized.shape == (*target_size, 3) else np.zeros((*target_size, 3), dtype=np.float32)
-        except Exception as e:
-            logger.error(f"Cropping error: {e}")
-            return np.zeros((*target_size, 3), dtype=np.float32)
-
-# 3. Attention Modules   
+# Attention Modules
 class EfficientChannelAttention(layers.Layer):
     def __init__(self, channels, reduction=8, **kwargs):
         super().__init__(**kwargs)
         self.channels = channels
         self.reduction = reduction
-        
         self.avg_pool = layers.GlobalAveragePooling2D()
         self.max_pool = layers.GlobalMaxPooling2D()
         self.fc = models.Sequential([
-            layers.Dense(channels//reduction, activation='relu'),
+            layers.Dense(channels // reduction, activation='relu'),
             layers.Dense(channels, activation='sigmoid')
         ])
-        
+
     def call(self, x):
         avg_out = self.fc(self.avg_pool(x))
         max_out = self.fc(self.max_pool(x))
         out = avg_out + max_out
         return tf.reshape(out, [-1, 1, 1, self.channels]) * x
-    
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            'channels': self.channels,
-            'reduction': self.reduction
-        })
-        return config
 
 class FixedSpatialAttention(layers.Layer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.conv = layers.Conv2D(1, 7, padding='same', activation='sigmoid')
-        
+
     def call(self, inputs):
         avg_out = tf.reduce_mean(inputs, axis=3, keepdims=True)
         max_out = tf.reduce_max(inputs, axis=3, keepdims=True)
         concat = tf.concat([avg_out, max_out], axis=3)
-        attention = self.conv(concat)
-        return attention * inputs
-    
-    def get_config(self):
-        return super().get_config()
+        return self.conv(concat) * inputs
 
 class FixedHybridBlock(layers.Layer):
     def __init__(self, filters, **kwargs):
         super().__init__(**kwargs)
         self.filters = filters
-        
         self.conv1 = layers.Conv2D(filters, 3, padding='same')
         self.conv2 = layers.Conv2D(filters, 3, padding='same')
         self.eca = EfficientChannelAttention(filters)
@@ -153,146 +99,98 @@ class FixedHybridBlock(layers.Layer):
             self.res_conv = layers.Conv2D(self.filters, 1)
 
     def call(self, inputs):
-        residual = inputs
-        
-        if self.res_conv is not None:
-            residual = self.res_conv(inputs)
-            
-        x = self.conv1(inputs)
-        x = self.norm1(x)
-        x = self.act(x)
-        
+        residual = self.res_conv(inputs) if self.res_conv else inputs
+        x = self.act(self.norm1(self.conv1(inputs)))
         x = self.eca(x)
         x = self.sa(x)
-            
-        x = self.conv2(x)
-        x = self.norm2(x)
-        
+        x = self.norm2(self.conv2(x))
         return self.act(x + residual)
-    
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            'filters': self.filters
-        })
-        return config
 
-# Initialize components
-cropper = FaceCropper()
-model = None
-
-@app.on_event("startup")
-async def startup_event():
-    global model
-    try:
-        # Verify model file exists and is readable
-        if not os.path.exists(MODEL_PATH):
-            raise RuntimeError(f"Model file not found at {MODEL_PATH}")
-            
-        with open(MODEL_PATH, 'rb') as f:
-            header = f.read(4)
-            if header != b'PK\x03\x04':  # ZIP file header
-                raise RuntimeError("Invalid model file format")
-        
-        custom_objects = {
+# Load Model
+def load_model():
+    download_model_if_needed()
+    return tf.keras.models.load_model(
+        MODEL_PATH,
+        custom_objects={
             'EfficientChannelAttention': EfficientChannelAttention,
             'FixedSpatialAttention': FixedSpatialAttention,
             'FixedHybridBlock': FixedHybridBlock
         }
-        
-        # Try different loading methods
+    )
+
+model = load_model()
+
+# Face Cropper
+class FaceCropper:
+    def safe_crop(self, path, target_size=(224, 224)):
         try:
-            model = tf.keras.models.load_model(
-                MODEL_PATH,
-                custom_objects=custom_objects,
-                compile=False
-            )
-        except:
-            # Fallback for different file formats
-            model = tf.keras.models.load_model(
-                MODEL_PATH,
-                custom_objects=custom_objects,
-                compile=False
-            )
-            
-        logger.info(f"Model loaded successfully. Input shape: {model.input_shape}")
-    except Exception as e:
-        logger.error(f"Failed to load model: {str(e)}")
-        # Provide more helpful error message
-        if 'file signature not found' in str(e):
-            raise RuntimeError("Invalid model file. Please check: \n"
-                            "1. The file is not corrupted\n"
-                            "2. It's a valid Keras model file\n"
-                            "3. The file was fully downloaded")
-        raise RuntimeError(f"Model loading failed: {str(e)}")
-# 4. Image Processing
-def preprocess_images(image_paths: List[str], target_size: tuple = (224, 224)) -> tuple:
-    def process_image(path: str) -> np.ndarray:
+            faces = DeepFace.extract_faces(path, detector_backend='opencv', enforce_detection=False)
+            if not faces:
+                img = cv2.imread(path)
+                return cv2.resize(img, target_size)
+            return cv2.resize(faces[0]['face'], target_size)
+        except Exception as e:
+            logger.warning(f"Cropping fallback: {e}")
+            return np.zeros((*target_size, 3), dtype=np.float32)
+
+cropper = FaceCropper()
+
+def is_valid_image_file(path):
+    ext = os.path.splitext(path)[1].lower()[1:]
+    if ext not in {'jpg', 'jpeg', 'png', 'bmp'}:
+        return False
+    if imghdr.what(path) not in ['jpeg', 'png', 'bmp']:
+        return False
+    return cv2.imread(path) is not None
+
+def preprocess_images(paths: List[str], target_size=(224, 224)):
+    def load_and_resize(path):
         try:
             img = tf.io.read_file(path)
             img = tf.image.decode_image(img, channels=3, expand_animations=False)
             img = tf.image.convert_image_dtype(img, tf.float32)
             return tf.image.resize(img, target_size).numpy()
-        except Exception as e:
-            logger.error(f"Image processing error: {str(e)}")
+        except Exception:
             return np.zeros((*target_size, 3), dtype=np.float32)
-    
-    full_imgs = [process_image(p) for p in image_paths]
-    face_imgs = [cropper.safe_crop(p, target_size) for p in image_paths]
-    
-    return np.array(full_imgs), np.array(face_imgs)
 
-# API Endpoints
+    return (
+        np.array([load_and_resize(p) for p in paths]),
+        np.array([cropper.safe_crop(p, target_size) for p in paths])
+    )
+
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(file: UploadFile = File(...)):
-    file_path = None
+    path = os.path.join(UPLOAD_FOLDER, file.filename)
     try:
-        # Validate file
-        if not file.filename.lower().endswith(tuple(ALLOWED_EXTENSIONS)):
-            raise HTTPException(status_code=400, detail="Invalid file type")
-        
-        # Save temporarily
-        file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-        with open(file_path, "wb") as buffer:
-            buffer.write(await file.read())
-        
-        if not is_valid_image_file(file_path):
-            raise HTTPException(status_code=400, detail="Invalid image file")
-        
-        # Process and predict
-        full_img, face_img = preprocess_images([file_path])
-        prediction = model.predict([full_img, face_img])
-        
-        # Format result
-        result = {
-            "image": file.filename,
-            "predicted_class": ['AI', 'FAKE', 'REAL'][np.argmax(prediction[0])],
-            "confidence": float(np.max(prediction[0])),
-            "probabilities": {
-                'AI': float(prediction[0][0]),
-                'FAKE': float(prediction[0][1]),
-                'REAL': float(prediction[0][2])
-            }
-        }
-        
-        return [result]
-    
-    except Exception as e:
-        logger.error(f"Prediction error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-    
-    finally:
-        # Cleanup
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+        with open(path, "wb") as f:
+            f.write(await file.read())
 
-@app.get("/health", response_model=HealthCheck)
-async def health_check():
+        if not is_valid_image_file(path):
+            raise HTTPException(status_code=400, detail="Invalid image")
+
+        full, face = preprocess_images([path])
+        pred = model.predict([full, face])[0]
+        return [{
+            "image": file.filename,
+            "predicted_class": ['AI', 'FAKE', 'REAL'][np.argmax(pred)],
+            "confidence": float(np.max(pred)),
+            "probabilities": {
+                'AI': float(pred[0]),
+                'FAKE': float(pred[1]),
+                'REAL': float(pred[2])
+            }
+        }]
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+@app.get("/", response_model=HealthCheck)
+async def health():
     return {
         "status": "API is running",
-        "model_loaded": model is not None
+        "model_loaded": Path(MODEL_PATH).exists()
     }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    uvicorn.run(app, host="0.0.0.0", port=8000)
