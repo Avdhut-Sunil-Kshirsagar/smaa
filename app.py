@@ -3,18 +3,24 @@ import logging
 import cv2
 import numpy as np
 import tensorflow as tf
-from flask import Flask, request, jsonify
-from werkzeug.utils import secure_filename
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import JSONResponse
 from tensorflow.keras import layers, models
 from deepface import DeepFace
 from pathlib import Path
+from typing import List
+import imghdr
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize Flask app
-app = Flask(__name__)
+# Initialize FastAPI app
+app = FastAPI(
+    title="Image Classification API",
+    description="API for detecting AI-generated, fake, or real images",
+    version="1.0.0"
+)
 
 # Configuration
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'bmp'}
@@ -26,20 +32,25 @@ MODEL_PATH = os.path.join(MODEL_DIR, 'final_model_11_4_2025.keras')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-app.config.update(
-    UPLOAD_FOLDER=UPLOAD_FOLDER,
-    MAX_CONTENT_LENGTH=16 * 1024 * 1024,  # 16MB limit
-    MODEL_PATH=MODEL_PATH
-)
-
 # Configure TensorFlow
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '1'
 policy = tf.keras.mixed_precision.Policy('mixed_float16')
 tf.keras.mixed_precision.set_global_policy(policy)
 
+# Response Models
+class PredictionResult(BaseModel):
+    image: str
+    class: str
+    confidence: float
+    probabilities: dict
+
+class HealthCheck(BaseModel):
+    status: str
+    model_loaded: bool
+
 # 1. Image Validator
-def is_valid_image_file(filepath):
+def is_valid_image_file(filepath: str) -> bool:
     try:
         ext = os.path.splitext(filepath)[1].lower()[1:]
         if ext not in ALLOWED_EXTENSIONS:
@@ -60,7 +71,7 @@ class FaceCropper:
     def __init__(self):
         logger.info("DeepFace initialized")
 
-    def safe_crop(self, image_path, target_size=(224, 224)):
+    def safe_crop(self, image_path: str, target_size: tuple = (224, 224)) -> np.ndarray:
         try:
             faces = DeepFace.extract_faces(
                 image_path, 
@@ -79,6 +90,8 @@ class FaceCropper:
         except Exception as e:
             logger.error(f"Cropping error: {e}")
             return np.zeros((*target_size, 3), dtype=np.float32)
+
+
 
 # 3. Attention Modules (unchanged from your original)   
 class EfficientChannelAttention(layers.Layer):
@@ -166,9 +179,11 @@ class FixedHybridBlock(layers.Layer):
         })
         return config
 
+
+
+
 # 4. Model Loading with Verification
-def load_custom_model(model_path):
-    # Verify model exists
+def load_custom_model(model_path: str) -> tf.keras.Model:
     if not Path(model_path).exists():
         raise FileNotFoundError(f"Model file missing at {model_path}")
     
@@ -189,11 +204,11 @@ def load_custom_model(model_path):
 
 # Initialize components
 cropper = FaceCropper()
-model = load_custom_model(app.config['MODEL_PATH'])
+model = load_custom_model(MODEL_PATH)
 
 # 5. Image Processing
-def preprocess_images(image_paths, target_size=(224, 224)):
-    def process_image(path):
+def preprocess_images(image_paths: List[str], target_size: tuple = (224, 224)) -> tuple:
+    def process_image(path: str) -> np.ndarray:
         try:
             img = tf.io.read_file(path)
             img = tf.image.decode_image(img, channels=3, expand_animations=False)
@@ -208,66 +223,103 @@ def preprocess_images(image_paths, target_size=(224, 224)):
     
     return np.array(full_imgs), np.array(face_imgs)
 
-# 6. Prediction Endpoint
-@app.route('/predict', methods=['POST'])
-def predict():
-    if 'files' not in request.files:
-        return jsonify({'error': 'No files provided'}), 400
+# API Endpoints
+@app.post("/predict", response_model=List[PredictionResult])
+async def predict(file: UploadFile = File(...)):
+    try:
+        # Validate file
+        if not file.filename.lower().endswith(tuple(ALLOWED_EXTENSIONS)):
+            raise HTTPException(status_code=400, detail="Invalid file type")
+        
+        # Save temporarily
+        file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+        with open(file_path, "wb") as buffer:
+            buffer.write(await file.read())
+        
+        if not is_valid_image_file(file_path):
+            raise HTTPException(status_code=400, detail="Invalid image file")
+        
+        # Process and predict
+        full_img, face_img = preprocess_images([file_path])
+        prediction = model.predict([full_img, face_img])
+        
+        # Format result
+        result = {
+            "image": file.filename,
+            "class": ['AI', 'FAKE', 'REAL'][np.argmax(prediction[0])],
+            "confidence": float(np.max(prediction[0])),
+            "probabilities": {
+                'AI': float(prediction[0][0]),
+                'FAKE': float(prediction[0][1]),
+                'REAL': float(prediction[0][2])
+            }
+        }
+        
+        return [result]
     
-    files = request.files.getlist('files')
-    if not files:
-        return jsonify({'error': 'Empty file list'}), 400
+    except Exception as e:
+        logger.error(f"Prediction error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     
+    finally:
+        # Cleanup
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+@app.post("/batch_predict", response_model=List[PredictionResult])
+async def batch_predict(files: List[UploadFile] = File(...)):
     saved_paths = []
     try:
-        # Save and validate files
+        # Validate and save files
         for file in files:
-            if not (file and allowed_file(file.filename)):
-                raise ValueError("Invalid file type")
+            if not file.filename.lower().endswith(tuple(ALLOWED_EXTENSIONS)):
+                raise HTTPException(status_code=400, detail=f"Invalid file type: {file.filename}")
             
-            filename = secure_filename(file.filename)
-            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(file_path)
+            file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+            with open(file_path, "wb") as buffer:
+                buffer.write(await file.read())
+            
+            if not is_valid_image_file(file_path):
+                raise HTTPException(status_code=400, detail=f"Invalid image file: {file.filename}")
+            
             saved_paths.append(file_path)
         
         # Process and predict
-        results = []
         full_imgs, face_imgs = preprocess_images(saved_paths)
         predictions = model.predict([full_imgs, face_imgs])
         
+        results = []
         for i, path in enumerate(saved_paths):
             results.append({
-                'image': os.path.basename(path),
-                'class': ['AI', 'FAKE', 'REAL'][np.argmax(predictions[i])],
-                'confidence': float(np.max(predictions[i])),
-                'probabilities': {
+                "image": os.path.basename(path),
+                "class": ['AI', 'FAKE', 'REAL'][np.argmax(predictions[i])],
+                "confidence": float(np.max(predictions[i])),
+                "probabilities": {
                     'AI': float(predictions[i][0]),
                     'FAKE': float(predictions[i][1]),
                     'REAL': float(predictions[i][2])
                 }
             })
         
-        return jsonify({'results': results})
+        return results
     
     except Exception as e:
-        logger.error(f"Prediction error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Batch prediction error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     
     finally:
         # Cleanup
         for path in saved_paths:
-            try:
-                if os.path.exists(path):
-                    os.path.remove(path)
-            except:
-                pass
+            if os.path.exists(path):
+                os.remove(path)
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({
-        'status': 'healthy',
-        'model_loaded': os.path.exists(app.config['MODEL_PATH'])
-    })
+@app.get("/", response_model=HealthCheck)
+async def health_check():
+    return {
+        "status": "API is running",
+        "model_loaded": os.path.exists(MODEL_PATH)
+    }
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
