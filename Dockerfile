@@ -22,17 +22,24 @@ COPY --chown=10014:10014 requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# 4. Copy application code
+# 4. Download model during build
+RUN wget --quiet --show-progress --no-check-certificate \
+    "https://drive.google.com/uc?export=download&id=1sUNdQHfqKBCW44wGEi158W2DK71g0BZE" \
+    -O /app/model/final_model_11_4_2025.keras && \
+    chown 10014:10014 /app/model/final_model_11_4_2025.keras && \
+    echo "Model size: $(du -h /app/model/final_model_11_4_2025.keras | cut -f1)"
+
+# 5. Copy application code
 COPY --chown=10014:10014 . .
 
-# 5. Set environment variables
+# 6. Set environment variables
 ENV MODEL_PATH=/app/model/final_model_11_4_2025.keras
 ENV DEEPFACE_HOME=/tmp/.deepface
 ENV UPLOAD_FOLDER=/tmp/uploads
 
-# 6. Use non-root user and expose port
+# 7. Use non-root user and expose port
 USER 10014
 EXPOSE 8000
 
-# 7. Run the FastAPI app with Gunicorn + Uvicorn worker
+# 8. Run the FastAPI app with Gunicorn + Uvicorn worker
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "-k", "uvicorn.workers.UvicornWorker", "app:app"]
