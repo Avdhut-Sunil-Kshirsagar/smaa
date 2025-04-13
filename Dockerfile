@@ -3,7 +3,10 @@ FROM python:3.9-slim
 # 1. Create non-root user and required directories
 RUN useradd -u 10014 -m appuser && \
     mkdir -p /app/model && \
-    chown -R appuser:appuser /app
+    mkdir -p /tmp/uploads && \
+    mkdir -p /tmp/.deepface && \
+    chown -R appuser:appuser /app && \
+    chown -R appuser:appuser /tmp
 
 # 2. Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -25,6 +28,13 @@ COPY --chown=appuser:appuser . .
 
 # 6. Set environment variables
 ENV MODEL_PATH=/app/model/final_model_11_4_2025.keras
+ENV DEEPFACE_HOME=/tmp/.deepface
+ENV UPLOAD_FOLDER=/tmp/uploads
+
+# 7. Verify model file exists and is accessible
+RUN ls -la /app/model/ && \
+    [ -f "/app/model/final_model_11_4_2025.keras" ] || exit 1 && \
+    chmod -R a+r /app/model
 
 USER 10014
 EXPOSE 8000
