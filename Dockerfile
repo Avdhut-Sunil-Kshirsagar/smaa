@@ -27,7 +27,6 @@ COPY --chown=10014:10014 . .
 
 # 5. Set environment variables
 ENV MODEL_PATH=/app/model/final_model_11_4_2025.keras
-ENV MODEL_URL=https://www.googleapis.com/drive/v3/files/1sUNdQHfqKBCW44wGEi158W2DK71g0BZE?alt=media&key=AIzaSyAQWd9J7XainNo1hx3cUzJsklrK-wm9Sng
 ENV DEEPFACE_HOME=/tmp/.deepface
 ENV UPLOAD_FOLDER=/tmp/uploads
 
@@ -35,5 +34,5 @@ ENV UPLOAD_FOLDER=/tmp/uploads
 USER 10014
 EXPOSE 8000
 
-# 7. Run the FastAPI app
+# 7. Run the FastAPI app with Gunicorn + Uvicorn worker
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "-k", "uvicorn.workers.UvicornWorker", "app:app"]
