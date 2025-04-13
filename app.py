@@ -257,7 +257,7 @@ async def batch_predict(files: List[UploadFile] = File(...)):
     finally:
         for path in saved_paths:
             if os.path.exists(path):
-                os.remove(path)
+                os.remove(path) 
 
 @app.get("/", response_model=HealthCheck)
 async def health_check():
