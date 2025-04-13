@@ -1,4 +1,6 @@
 import os
+os.environ['DEEPFACE_HOME'] = '/tmp/deepface'
+
 import logging
 import cv2
 import numpy as np
