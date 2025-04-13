@@ -1,39 +1,8 @@
-# Core Requirements
+tensorflow==2.17.1
 fastapi==0.110.0
 uvicorn==0.29.0
 gunicorn==23.0.0
-python-multipart==0.0.9
-pydantic==2.7.1
-pydantic-settings==2.2.1
-
-# TensorFlow and Keras
-tensorflow-cpu==2.14.0  # Downgraded to stable version
-keras==2.14.0  # Matching version with TensorFlow
-
-# DeepFace
 deepface==0.0.93
-
-# Image Processing
-opencv-python-headless==4.8.0.76  # Stable version
-pillow==10.2.0  # Compatible version
-
-# Numerical Computing
-numpy==1.24.4  # Version known to work with TF 2.14
-pandas==2.1.4
-
-# Protocol Buffers
-protobuf==3.20.3  # Compatible version
-
-# ASGI Server
-httptools==0.6.1
-uvloop==0.19.0
-click==8.1.7
-
-# Runtime Dependencies
-python-dotenv==1.0.1
-requests==2.31.0
-tqdm==4.66.1
-
-# Utilities
-loguru==0.7.2
-typing-extensions==4.8.0
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+requests==2.32.3
