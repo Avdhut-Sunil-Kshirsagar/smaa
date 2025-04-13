@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Image Classification API")
 
 # Paths & Constants
-MODEL_PATH = "/app/model/final_model_11_4_2025.keras"
+MODEL_PATH = "/tmp/model/final_model_11_4_2025.keras"
 MODEL_URL = "https://www.googleapis.com/drive/v3/files/1sUNdQHfqKBCW44wGEi158W2DK71g0BZE?alt=media&key=AIzaSyAQWd9J7XainNo1hx3cUzJsklrK-wm9Sng"
 UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
