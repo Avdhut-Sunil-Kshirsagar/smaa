@@ -2,26 +2,37 @@
 fastapi==0.110.0
 uvicorn==0.29.0
 gunicorn==23.0.0
-python-multipart==0.0.9  # Required for file uploads
-pydantic==2.7.1  # For data validation
+python-multipart==0.0.9
+pydantic==2.7.1
+pydantic-settings==2.2.1  # For better config management
 
 # Deep Learning
-tensorflow-cpu==2.14.0
+tensorflow-cpu==2.16.1  # Updated to latest stable version
+keras==2.16.0  # Explicitly specify Keras version
 deepface==0.0.93
+h5py==3.11.0  # Required for model loading
 
 # Image Processing
-opencv-python-headless==4.10.0.84
-pillow==11.0.0
+opencv-python-headless==4.9.0.80  # Updated to stable version
+pillow==10.3.0  # More stable version
 
 # Numerical Computing
 numpy==1.26.4
+pandas==2.2.2  # Often needed for data processing
 
 # Protocol Buffers
-protobuf==3.20.3
+protobuf==4.25.3  # Updated version
 
-# ASGI Server (for FastAPI)
+# ASGI Server
 httptools==0.6.1
-uvloop==0.19.0  # Optional but recommended for Linux
+uvloop==0.19.0
+click==8.1.7  # Required by uvicorn
 
 # Runtime Dependencies
-python-dotenv==1.0.1  # For environment variables
+python-dotenv==1.0.1
+requests==2.31.0  # For potential HTTP requests
+tqdm==4.66.2  # For progress bars
+
+# Additional Utilities
+loguru==0.7.2  # Better logging
+typing-extensions==4.11.0  # For better type hints
