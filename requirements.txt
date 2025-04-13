@@ -1,19 +1,27 @@
 # Core Requirements
-flask==2.3.2
-flask-cors==5.0.1
+fastapi==0.110.0
+uvicorn==0.29.0
 gunicorn==23.0.0
+python-multipart==0.0.9  # Required for file uploads
+pydantic==2.7.1  # For data validation
 
 # Deep Learning
 tensorflow-cpu==2.14.0
 deepface==0.0.93
 
 # Image Processing
-opencv-python-headless==4.10.0.84  # Headless version for server
+opencv-python-headless==4.10.0.84
 pillow==11.0.0
-
 
 # Numerical Computing
 numpy==1.26.4
 
 # Protocol Buffers
-protobuf==3.20.3  # Prevents conflicts with TensorFlow
+protobuf==3.20.3
+
+# ASGI Server (for FastAPI)
+httptools==0.6.1
+uvloop==0.19.0  # Optional but recommended for Linux
+
+# Runtime Dependencies
+python-dotenv==1.0.1  # For environment variables
