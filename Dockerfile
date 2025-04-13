@@ -22,34 +22,51 @@ COPY --chown=10014:10014 requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# 4. Download model from Google Drive
-RUN wget --load-cookies /tmp/cookies.txt \
-    "https://docs.google.com/uc?export=download&confirm=$(wget --quiet --save-cookies /tmp/cookies.txt --keep-session-cookies --no-check-certificate 'https://docs.google.com/uc?export=download&id=1sUNdQHfqKBCW44wGEi158W2DK71g0BZE' -O- | sed -rn 's/.*confirm=([0-9A-Za-z_]+).*/\1\n/p')&id=1sUNdQHfqKBCW44wGEi158W2DK71g0BZE" \
-    -O /app/model/final_model_11_4_2025.keras && \
-    rm -rf /tmp/cookies.txt && \
-    chown 10014:10014 /app/model/final_model_11_4_2025.keras
+# 4. Download model with proper handling of large files
+RUN wget --quiet --save-cookies /tmp/cookies.txt \
+    --keep-session-cookies \
+    --no-check-certificate \
+    "https://docs.google.com/uc?export=download&id=1sUNdQHfqKBCW44wGEi158W2DK71g0BZE" \
+    -O- | sed -rn 's/.*confirm=([0-9A-Za-z_]+).*/\1\n/p' > /tmp/confirm.txt && \
+    wget --quiet --load-cookies /tmp/cookies.txt \
+    -O /app/model/final_model_11_4_2025.keras \
+    "https://docs.google.com/uc?export=download&confirm=$(cat /tmp/confirm.txt)&id=1sUNdQHfqKBCW44wGEi158W2DK71g0BZE" && \
+    rm -rf /tmp/cookies.txt /tmp/confirm.txt && \
+    chown 10014:10014 /app/model/final_model_11_4_2025.keras && \
+    echo "Downloaded file size: $(du -h /app/model/final_model_11_4_2025.keras | cut -f1)"
 
 # 5. Create and verify the model file
 RUN cat <<EOF > verify_model.py
 import os
 import tensorflow as tf
 
-print("Verifying model file...")
-print("Model file exists:", tf.io.gfile.exists("/app/model/final_model_11_4_2025.keras"))
-print("File size:", os.path.getsize("/app/model/final_model_11_4_2025.keras"))
+print("\n=== Starting Model Verification ===")
+print("Model path:", "/app/model/final_model_11_4_2025.keras")
+print("File exists:", os.path.exists("/app/model/final_model_11_4_2025.keras"))
+print("File size (MB):", os.path.getsize("/app/model/final_model_11_4_2025.keras")/1e6)
 
+# Verify file header
 try:
     with open("/app/model/final_model_11_4_2025.keras", "rb") as f:
         header = f.read(4)
-        print("File header:", header)
+        print("\nFile header:", header)
         assert header == b'PK\x03\x04', "Invalid Keras model file header"
-    print("Basic file verification passed")
-    
-    # Skip actual model loading in build stage to keep image smaller
-    print("Skipping full model load during build (will load at runtime)")
+        print("✅ File header verification passed")
+        
+        # Quick load test without processing the full model
+        print("\nTesting model load...")
+        model = tf.keras.models.load_model(
+            "/app/model/final_model_11_4_2025.keras",
+            compile=False
+        )
+        print("✅ Model loaded successfully!")
+        print("Model summary:")
+        model.summary()
 except Exception as e:
-    print(f"File verification failed: {str(e)}")
+    print(f"\n❌ Verification failed: {str(e)}")
     raise
+
+print("\n=== Verification completed successfully ===")
 EOF
 
 # 6. Run model verification
