@@ -1,8 +1,17 @@
+# FastAPI & ASGI
+fastapi
+uvicorn[standard]
+gunicorn
+
+# Deep Learning
 tensorflow==2.15.0
-keras==2.15.0
-fastapi==0.110.0
-uvicorn==0.29.0
-gunicorn==23.0.0
-deepface==0.0.93
-opencv-python-headless==4.10.0.84
-numpy==1.26.4
+
+# Image processing
+opencv-python-headless
+
+# Face detection and analysis
+deepface
+
+# Utility & Validation
+pydantic
+requests
