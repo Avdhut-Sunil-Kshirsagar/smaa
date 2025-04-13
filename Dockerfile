@@ -39,8 +39,6 @@ from tensorflow.keras import layers
 tf.keras.mixed_precision.set_global_policy('float32')
 
 print("\n=== Starting Model Verification ===")
-print(f"TensorFlow version: {tf.__version__}")
-print(f"Keras version: {tf.keras.__version__}")
 
 # FixedHybridBlock with proper precision handling
 class FixedHybridBlock(layers.Layer):
