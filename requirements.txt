@@ -9,7 +9,8 @@ deepface==0.0.93
 
 # Image Processing
 opencv-python-headless==4.10.0.84  # Headless version for server
-pillow==9.5.0
+pillow==11.0.0
+
 
 # Numerical Computing
 numpy==1.26.4
