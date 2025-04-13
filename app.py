@@ -185,17 +185,46 @@ model = None
 async def startup_event():
     global model
     try:
+        # Verify model file exists and is readable
+        if not os.path.exists(MODEL_PATH):
+            raise RuntimeError(f"Model file not found at {MODEL_PATH}")
+            
+        with open(MODEL_PATH, 'rb') as f:
+            header = f.read(4)
+            if header != b'PK\x03\x04':  # ZIP file header
+                raise RuntimeError("Invalid model file format")
+        
         custom_objects = {
             'EfficientChannelAttention': EfficientChannelAttention,
             'FixedSpatialAttention': FixedSpatialAttention,
             'FixedHybridBlock': FixedHybridBlock
         }
-        model = tf.keras.models.load_model(MODEL_PATH, custom_objects=custom_objects, compile=False)
-        logger.info("Model loaded successfully")
+        
+        # Try different loading methods
+        try:
+            model = tf.keras.models.load_model(
+                MODEL_PATH,
+                custom_objects=custom_objects,
+                compile=False
+            )
+        except:
+            # Fallback for different file formats
+            model = tf.keras.models.load_model(
+                MODEL_PATH,
+                custom_objects=custom_objects,
+                compile=False
+            )
+            
+        logger.info(f"Model loaded successfully. Input shape: {model.input_shape}")
     except Exception as e:
         logger.error(f"Failed to load model: {str(e)}")
+        # Provide more helpful error message
+        if 'file signature not found' in str(e):
+            raise RuntimeError("Invalid model file. Please check: \n"
+                            "1. The file is not corrupted\n"
+                            "2. It's a valid Keras model file\n"
+                            "3. The file was fully downloaded")
         raise RuntimeError(f"Model loading failed: {str(e)}")
-
 # 4. Image Processing
 def preprocess_images(image_paths: List[str], target_size: tuple = (224, 224)) -> tuple:
     def process_image(path: str) -> np.ndarray:
