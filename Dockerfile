@@ -21,20 +21,23 @@ COPY --chown=appuser:appuser requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 4. Copy model file separately (large file optimization)
-COPY --chown=appuser:appuser model/final_model_11_4_2025.keras /app/model/
+COPY --chown=appuser:appuser model/ /app/model/
 
-# 5. Copy the rest of the application
+# 5. Verify model file
+RUN python -c "\
+import tensorflow as tf; \
+print('Model file exists:', tf.io.gfile.exists('/app/model/final_model_11_4_2025.keras')); \
+try: tf.keras.models.load_model('/app/model/final_model_11_4_2025.keras'); \
+print('Model loaded successfully'); \
+except Exception as e: print(f'Model loading failed: {str(e)}')"
+
+# 6. Copy the rest of the application
 COPY --chown=appuser:appuser . .
 
-# 6. Set environment variables
+# 7. Set environment variables
 ENV MODEL_PATH=/app/model/final_model_11_4_2025.keras
 ENV DEEPFACE_HOME=/tmp/.deepface
 ENV UPLOAD_FOLDER=/tmp/uploads
-
-# 7. Verify model file exists and is accessible
-RUN ls -la /app/model/ && \
-    [ -f "/app/model/final_model_11_4_2025.keras" ] || exit 1 && \
-    chmod -R a+r /app/model
 
 USER 10014
 EXPOSE 8000
