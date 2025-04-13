@@ -4,7 +4,7 @@ flask-cors==5.0.1
 gunicorn==23.0.0
 
 # Deep Learning
-tensorflow-cpu==2.12.0  # Using stable CPU version for cloud
+tensorflow-cpu==2.14.0
 deepface==0.0.93
 
 # Image Processing
