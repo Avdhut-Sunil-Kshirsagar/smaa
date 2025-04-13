@@ -12,27 +12,36 @@ RUN useradd -u 10014 -m appuser && \
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 3. Upgrade pip and install Python dependencies (improves build caching)
+# 3. Upgrade pip and install Python dependencies
 COPY --chown=appuser:appuser requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# 4. Copy model separately (allows Docker caching)
-COPY --chown=appuser:appuser model/ /app/model/
+# 4. Download model from Google Drive
+RUN wget --load-cookies /tmp/cookies.txt \
+    "https://docs.google.com/uc?export=download&confirm=$(wget --quiet --save-cookies /tmp/cookies.txt --keep-session-cookies --no-check-certificate 'https://docs.google.com/uc?export=download&id=1sUNdQHfqKBCW44wGEi158W2DK71g0BZE' -O- | sed -rn 's/.*confirm=([0-9A-Za-z_]+).*/\1\n/p')&id=1sUNdQHfqKBCW44wGEi158W2DK71g0BZE" \
+    -O /app/model/final_model_11_4_2025.keras && \
+    rm -rf /tmp/cookies.txt && \
+    chown appuser:appuser /app/model/final_model_11_4_2025.keras
 
 # 5. Create and verify the model file
 RUN cat <<EOF > verify_model.py
 import tensorflow as tf
 print("Model file exists:", tf.io.gfile.exists("/app/model/final_model_11_4_2025.keras"))
+print("File size:", os.path.getsize("/app/model/final_model_11_4_2025.keras"))
 try:
-    tf.keras.models.load_model("/app/model/final_model_11_4_2025.keras")
-    print("Model loaded successfully")
+    with open("/app/model/final_model_11_4_2025.keras", "rb") as f:
+        header = f.read(4)
+        print("File header:", header)
+        assert header == b'PK\x03\x04', "Invalid Keras model file header"
+    print("Basic file verification passed")
 except Exception as e:
-    print(f"Model loading failed: {str(e)}")
+    print(f"File verification failed: {str(e)}")
 EOF
 
 # 6. Run model verification
@@ -47,7 +56,7 @@ ENV DEEPFACE_HOME=/tmp/.deepface
 ENV UPLOAD_FOLDER=/tmp/uploads
 
 # 9. Use non-root user and expose port
-USER 10014
+USER appuser
 EXPOSE 8000
 
 # 10. Run the FastAPI app with Gunicorn + Uvicorn worker
