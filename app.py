@@ -41,7 +41,7 @@ tf.keras.mixed_precision.set_global_policy(policy)
 # Response Models
 class PredictionResult(BaseModel):
     image: str
-    class: str
+    predicted_class: str
     confidence: float
     probabilities: dict
 
@@ -246,7 +246,7 @@ async def predict(file: UploadFile = File(...)):
         # Format result
         result = {
             "image": file.filename,
-            "class": ['AI', 'FAKE', 'REAL'][np.argmax(prediction[0])],
+            "predicted_class": ['AI', 'FAKE', 'REAL'][np.argmax(prediction[0])],
             "confidence": float(np.max(prediction[0])),
             "probabilities": {
                 'AI': float(prediction[0][0]),
@@ -292,7 +292,7 @@ async def batch_predict(files: List[UploadFile] = File(...)):
         for i, path in enumerate(saved_paths):
             results.append({
                 "image": os.path.basename(path),
-                "class": ['AI', 'FAKE', 'REAL'][np.argmax(predictions[i])],
+                "predicted_class": ['AI', 'FAKE', 'REAL'][np.argmax(predictions[i])],
                 "confidence": float(np.max(predictions[i])),
                 "probabilities": {
                     'AI': float(predictions[i][0]),
