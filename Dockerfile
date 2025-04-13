@@ -22,17 +22,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 4. Copy model and verify it
 COPY --chown=10014:10014 model/ /app/model/
-RUN python3 -c "
-import tensorflow as tf
-import os
-print(f'Model file size: {os.path.getsize(\"/app/model/final_model_11_4_2025.keras\")} bytes')
-try:
-    model = tf.keras.models.load_model('/app/model/final_model_11_4_2025.keras')
-    print('Model verification passed!')
-    model.summary()
-except Exception as e:
-    print(f'Model verification failed: {str(e)}')
-    raise
+RUN python3 -c "\
+import tensorflow as tf;\
+import os;\
+print(f'Model file size: {os.path.getsize(\"/app/model/final_model_11_4_2025.keras\")} bytes');\
+try:\
+    model = tf.keras.models.load_model('/app/model/final_model_11_4_2025.keras');\
+    print('Model verification passed!');\
+    model.summary();\
+except Exception as e:\
+    print(f'Model verification failed: {str(e)}');\
+    raise;\
 "
 
 # 5. Copy application code
