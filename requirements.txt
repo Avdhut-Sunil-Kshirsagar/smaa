@@ -1,8 +1,9 @@
 fastapi==0.109.2
 uvicorn==0.27.1
-tensorflow-cpu==2.17.1  # Explicit CPU-only version
+tensorflow-cpu==2.17.1
 numpy==1.26.4
-opencv-python-headless==4.10.0.84  # Headless version for containers
+opencv-python-headless==4.10.0.84
 deepface==0.0.89
 requests==2.31.0
 python-multipart==0.0.7
+tf_keras==2.15.0  # Explicitly add this
