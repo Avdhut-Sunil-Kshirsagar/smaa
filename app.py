@@ -1,4 +1,17 @@
+import sys
 import os
+os.environ['DEEPFACE_HOME'] = '/tmp/.deepface'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
+# Add this before any other imports
+try:
+    import keras
+    import tensorflow as tf
+    sys.modules['tf_keras'] = tf.keras
+except ImportError:
+    pass
+  
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import tensorflow as tf
@@ -10,10 +23,6 @@ from deepface import DeepFace
 from typing import List
 import tempfile
 import requests
-
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-os.environ['DEEPFACE_HOME'] = '/tmp/.deepface'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow logs
 
 # Set mixed precision policy
 policy = tf.keras.mixed_precision.Policy('mixed_float16')
