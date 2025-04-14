@@ -45,7 +45,7 @@ RUN mkdir -p /tmp/.deepface && \
     chmod -R 777 /tmp && \
     chown -R appuser:appuser /tmp
 
-USER appuser
+USER 15000
 
 EXPOSE 8000
 
