@@ -13,7 +13,7 @@ ENV DEEPFACE_HOME=/tmp/.deepface
 ENV TF_CPP_MIN_LOG_LEVEL=3
 ENV CUDA_VISIBLE_DEVICES=-1
 
-# Install system dependencies for OpenCV and other libraries
+# Install system dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     libgl1 \
@@ -27,11 +27,14 @@ RUN apt-get update && \
 # Set working directory
 WORKDIR /app
 
-# Copy requirements first for better caching
+# Copy requirements first
 COPY requirements.txt .
 
-# Install Python dependencies (CPU-only versions)
+# Install Python dependencies with specific versions
 RUN pip install --no-cache-dir -r requirements.txt && \
+    # Install tf_keras separately if needed
+    pip install tf_keras==2.15.0 && \
+    # Clean up
     find /usr/local/lib/python3.9 -type d -name '__pycache__' -exec rm -r {} + && \
     rm -rf /root/.cache/pip
 
