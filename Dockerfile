@@ -11,6 +11,7 @@ ENV PYTHONUNBUFFERED=1
 ENV DEEPFACE_HOME=/tmp/.deepface
 ENV TF_CPP_MIN_LOG_LEVEL=3
 ENV CUDA_VISIBLE_DEVICES=-1
+ENV TF_USE_LEGACY_KERAS=1
 
 # Install system dependencies
 RUN apt-get update && \
@@ -25,10 +26,11 @@ RUN apt-get update && \
 
 WORKDIR /app
 
+# Copy requirements first for caching
 COPY requirements.txt .
 
-# Install with --no-deps to prevent conflicts
-RUN pip install --no-cache-dir -r requirements.txt --no-deps && \
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt && \
     find /usr/local/lib/python3.9 -type d -name '__pycache__' -exec rm -r {} + && \
     rm -rf /root/.cache/pip
 
