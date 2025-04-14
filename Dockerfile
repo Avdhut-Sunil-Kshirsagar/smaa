@@ -32,8 +32,10 @@ COPY requirements.txt .
 # Install Python dependencies with exact versions
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
-    pip check && \  # Verify no dependency conflicts
-    find /usr/local/lib/python3.9 -type d -name '__pycache__' -exec rm -r {} + && \
+    pip check
+
+# Clean up Python cache
+RUN find /usr/local/lib/python3.9 -type d -name '__pycache__' -exec rm -r {} + && \
     rm -rf /root/.cache/pip
 
 COPY app.py .
@@ -43,7 +45,7 @@ RUN mkdir -p /tmp/.deepface && \
     chmod -R 777 /tmp && \
     chown -R appuser:appuser /tmp
 
-USER 15000
+USER appuser
 
 EXPOSE 8000
 
