@@ -1,8 +1,9 @@
 fastapi==0.109.2
 uvicorn==0.27.1
-tensorflow-cpu==2.15.0  # Downgrade to stable version
+click==8.1.7  # Explicitly add click
+tensorflow-cpu==2.15.0
 numpy==1.26.4
 opencv-python-headless==4.10.0.84
-deepface==0.0.79  # Stable version without Keras 3 issues
+deepface==0.0.79
 requests==2.31.0
 python-multipart==0.0.7
