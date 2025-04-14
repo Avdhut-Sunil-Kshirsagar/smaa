@@ -14,9 +14,6 @@ except ImportError:
 
 # Workaround for Keras 3 compatibility issues
 os.environ['TF_USE_LEGACY_KERAS'] = '1'
-
-# Must be before any other imports
-import tensorflow as tf
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
   
 from fastapi import FastAPI, UploadFile, File, HTTPException
