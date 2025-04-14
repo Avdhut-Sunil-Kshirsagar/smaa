@@ -7,11 +7,11 @@ RUN useradd -u 15000 -m appuser && \
     chown appuser:appuser /app
 
 # Set environment variables
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 ENV DEEPFACE_HOME=/tmp/.deepface
-ENV TF_CPP_MIN_LOG_LEVEL=3  # Suppress all TensorFlow logs
-ENV CUDA_VISIBLE_DEVICES=-1 # Explicitly disable CUDA
+ENV TF_CPP_MIN_LOG_LEVEL=3
+ENV CUDA_VISIBLE_DEVICES=-1
 
 # Install system dependencies for OpenCV and other libraries
 RUN apt-get update && \
@@ -32,7 +32,6 @@ COPY requirements.txt .
 
 # Install Python dependencies (CPU-only versions)
 RUN pip install --no-cache-dir -r requirements.txt && \
-    # Clean up
     find /usr/local/lib/python3.9 -type d -name '__pycache__' -exec rm -r {} + && \
     rm -rf /root/.cache/pip
 
