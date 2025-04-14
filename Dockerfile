@@ -1,7 +1,6 @@
-# Use the official Python slim image
 FROM python:3.9-slim
 
-# Create non-root user (UID between 10000-20000)
+# Create non-root user
 RUN useradd -u 15000 -m appuser && \
     mkdir -p /app && \
     chown appuser:appuser /app
@@ -24,21 +23,15 @@ RUN apt-get update && \
     && \
     rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements first
 COPY requirements.txt .
 
-# Install Python dependencies with specific versions
-RUN pip install --no-cache-dir -r requirements.txt && \
-    # Install tf_keras separately if needed
-    pip install tf_keras==2.15.0 && \
-    # Clean up
+# Install with --no-deps to prevent conflicts
+RUN pip install --no-cache-dir -r requirements.txt --no-deps && \
     find /usr/local/lib/python3.9 -type d -name '__pycache__' -exec rm -r {} + && \
     rm -rf /root/.cache/pip
 
-# Copy application code
 COPY app.py .
 
 # Set up temp directory
@@ -46,15 +39,11 @@ RUN mkdir -p /tmp/.deepface && \
     chmod -R 777 /tmp && \
     chown -R appuser:appuser /tmp
 
-# Switch to non-root user
 USER 15000
 
-# Expose port
 EXPOSE 8000
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the application
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
