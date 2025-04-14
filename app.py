@@ -3,22 +3,11 @@ import os
 os.environ['DEEPFACE_HOME'] = '/tmp/.deepface'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-
-# Add this before any other imports
-try:
-    import keras
-    import tensorflow as tf
-    sys.modules['tf_keras'] = tf.keras
-except ImportError:
-    pass
-
-# Workaround for Keras 3 compatibility issues
-os.environ['TF_USE_LEGACY_KERAS'] = '1'
-tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
   
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import tensorflow as tf
+from tensorflow import keras
 from tensorflow.keras import layers, models
 import numpy as np
 import cv2
