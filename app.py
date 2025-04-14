@@ -1,6 +1,4 @@
 import os
-os.environ['DEEPFACE_HOME'] = '/tmp/.deepface'
-
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import tensorflow as tf
@@ -13,9 +11,9 @@ from typing import List
 import tempfile
 import requests
 
-# Configure environment to match training settings
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+os.environ['DEEPFACE_HOME'] = '/tmp/.deepface'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow logs
 
 # Set mixed precision policy
 policy = tf.keras.mixed_precision.Policy('mixed_float16')
