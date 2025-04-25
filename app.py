@@ -27,8 +27,7 @@ app = FastAPI(title="Deepfake Detection API",
               version="1.0")
 
 # Constants
-MODEL_URL = "https://www.googleapis.com/drive/v3/files/1sUNdQHfqKBCW44wGEi158W2DK71g0BZE?alt=media&key=AIzaSyAQWd9J7XainNo1hx3cUzJsklrK-wm9Sng"
-MODEL_DIR = os.path.join(tempfile.gettempdir(), "model")
+MODEL_DIR = os.path.join(os.getenv('MODEL_DIR', '/app/model'))
 MODEL_PATH = os.path.join(MODEL_DIR, "final_model_11_4_2025.keras")
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
@@ -119,28 +118,10 @@ class FixedHybridBlock(layers.Layer):
         })
         return config
 
-def download_model():
-    if not os.path.exists(MODEL_PATH):
-        print("Downloading model...")
-        try:
-            os.makedirs(MODEL_DIR, exist_ok=True)
-            response = requests.get(MODEL_URL, stream=True)
-            response.raise_for_status()
-            
-            temp_path = os.path.join(MODEL_DIR, "temp_model.keras")
-            with open(temp_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            
-            shutil.move(temp_path, MODEL_PATH)
-            print(f"Model downloaded successfully to {MODEL_PATH}")
-        except Exception as e:
-            print(f"Error downloading model: {e}")
-            raise
-    else:
-        print("Model already exists, skipping download.")
-
 def load_model():
+    if not os.path.exists(MODEL_PATH):
+        raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
+    
     custom_objects = {
         'EfficientChannelAttention': EfficientChannelAttention,
         'FixedSpatialAttention': FixedSpatialAttention,
@@ -162,6 +143,8 @@ class FaceCropper:
             if len(faces) == 0:
                 print("No face detected, using full image as cropped face.")
                 full_img = cv2.imread(image_path)
+                if full_img is None:
+                    raise ValueError("Failed to read image file")
                 cropped_face = cv2.resize(full_img, target_size)
             else:
                 cropped_face = faces[0]['face']
@@ -179,7 +162,7 @@ class FaceCropper:
 def is_valid_image(file_bytes):
     try:
         image_type = imghdr.what(None, h=file_bytes)
-        return image_type in ['jpeg','jpg', 'png', 'bmp']
+        return image_type in ['jpeg', 'jpg', 'png', 'bmp']
     except:  
         return False
 
@@ -192,19 +175,19 @@ def preprocess_image(file_path, target_size=(224, 224)):
             img = tf.image.decode_image(img, channels=3, expand_animations=False)
         img = tf.image.convert_image_dtype(img, tf.float32)
         return tf.image.resize(img, target_size).numpy()
-    except:
+    except Exception as e:
+        print(f"Error preprocessing image: {e}")
         return np.zeros((*target_size, 3), dtype=np.float32)
 
 @app.on_event("startup")
 async def startup_event():
     try:
-        download_model()
         app.state.model = load_model()
         app.state.cropper = FaceCropper()
         print("Model and face cropper initialized successfully.")
     except Exception as e:
         print(f"Error during startup: {e}")
-        raise
+        raise RuntimeError(f"Failed to initialize model: {e}")
 
 @app.post("/predict", response_model=List[dict])
 async def predict(files: List[UploadFile] = File(...)):
@@ -239,20 +222,33 @@ async def predict(files: List[UploadFile] = File(...)):
                     "confidence": confidence,
                     "probabilities": {name: float(prob) for name, prob in zip(CLASS_NAMES, prediction)}
                 })
+            except Exception as e:
+                results.append({
+                    "filename": file.filename,
+                    "error": f"Processing error: {str(e)}"
+                })
             finally:
-                os.unlink(temp_path)
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
                 
+        except HTTPException:
+            raise
         except Exception as e:
             results.append({
                 "filename": file.filename,
-                "error": str(e)
+                "error": f"Unexpected error: {str(e)}"
             })
     
     return results
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "model_loaded": hasattr(app.state, "model")}
+    return {
+        "status": "healthy",
+        "model_loaded": hasattr(app.state, "model"),
+        "model_path": MODEL_PATH,
+        "model_exists": os.path.exists(MODEL_PATH)
+    }
 
 if __name__ == "__main__":
     import uvicorn
