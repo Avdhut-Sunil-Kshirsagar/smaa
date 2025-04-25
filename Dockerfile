@@ -1,58 +1,36 @@
-# ---- Stage 1: Builder ----
-FROM python:3.11-slim as builder
+# Use the official Python 3.8 slim image as a base
+FROM python:3.8-slim
+
+# Set environment variables
+ENV DEEPFACE_HOME="/tmp/.deepface"
+ENV TF_CPP_MIN_LOG_LEVEL="3"
+ENV CUDA_VISIBLE_DEVICES="-1"
+ENV PYTHONUNBUFFERED=1
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
     libgl1-mesa-glx \
-    wget \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies in isolated directory
+# Add a non-root user with UID between 10000 and 20000
+RUN useradd -m -u 15000 deepfakeuser
+
+# Set the user to be the non-root user
+USER deepfakeuser
+
+# Set the working directory for the app
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --upgrade pip \
- && pip install --prefix=/install -r requirements.txt
+# Copy the requirements.txt and install dependencies
+COPY --chown=deepfakeuser:deepfakeuser requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# ---- Stage 2: Runtime Image ----
-FROM python:3.11-slim
+# Copy the application code to the container with the appropriate ownership
+COPY --chown=deepfakeuser:deepfakeuser . /app
 
-# System dependencies
-RUN apt-get update && apt-get install -y \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    libgl1-mesa-glx \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create non-root user
-RUN useradd -u 10014 -m appuser
-
-# Set working directory
-WORKDIR /app
-
-# Copy installed Python packages
-COPY --from=builder /install /usr/local
-
-# Copy application code
-COPY . .
-
-# Give permission to appuser
-RUN chown -R appuser:appuser /app
-
-# Switch to non-root user
-USER 10014
-
-# Expose port
+# Expose the port that FastAPI runs on
 EXPOSE 8000
 
-# Start the app
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Command to run the FastAPI application with Uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
