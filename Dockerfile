@@ -3,7 +3,6 @@ FROM python:3.10-slim
 
 # Set environment variables
 ENV DEEPFACE_HOME="/tmp/.deepface"
-ENV TF_CPP_MIN_LOG_LEVEL="3"
 ENV CUDA_VISIBLE_DEVICES="-1"
 ENV PYTHONUNBUFFERED=1
 ENV MODEL_DIR="/app/model"
