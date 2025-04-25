@@ -1,0 +1,30 @@
+component:
+  name: deepfake-detector
+  type: service
+  build:
+    type: python
+    pythonVersion: "3.10"
+    commands:
+      # Clean up space before install
+      - rm -rf /var/lib/apt/lists/*
+      - pip install --no-cache-dir --no-warn-script-location -r requirements.txt
+      # Clean up after install
+      - find /usr/local/lib/python3.10 -type d -name "__pycache__" -exec rm -rf {} +
+      - rm -rf /tmp/*
+  deployment:
+    replicas: 1
+    resources:
+      requests:
+        cpu: "2"
+        memory: "4Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+    ports:
+      - containerPort: 8000
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
