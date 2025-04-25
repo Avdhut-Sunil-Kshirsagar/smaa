@@ -15,6 +15,7 @@ from deepface import DeepFace
 from typing import List
 import tempfile
 import requests
+from fastapi.openapi.utils import get_openapi
 
 # Set mixed precision policy
 policy = tf.keras.mixed_precision.Policy('mixed_float16')
@@ -247,6 +248,24 @@ async def predict(files: List[UploadFile] = File(...)):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "model_loaded": hasattr(app.state, "model")}
+
+
+
+# Generate OpenAPI schema
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="Deepfake Detection API",
+        version="1.0.0",
+        description="API for detecting deepfake, real and AI-generated images",
+        routes=app.routes,
+    )
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
+
 
 if __name__ == "__main__":
     import uvicorn
