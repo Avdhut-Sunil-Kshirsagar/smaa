@@ -2,9 +2,9 @@ FROM python:3.9-slim
 
 # 1. Create non-root user and required directories
 RUN useradd -u 10014 -m appuser && \
-    mkdir -p /app/model && \
-    mkdir -p /tmp/uploads && \
+    mkdir -p /app && \
     mkdir -p /tmp/.deepface && \
+    mkdir -p /tmp/model && \
     chown -R appuser:appuser /app && \
     chown -R appuser:appuser /tmp
 
@@ -16,26 +16,26 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# 3. Install Python dependencies first (better caching)
+# 3. Copy requirements first for better caching
 COPY --chown=appuser:appuser requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. Copy model file separately (large file optimization)
-COPY --chown=appuser:appuser model/final_model_11_4_2025.keras /app/model/
+# 4. Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# 5. Copy the rest of the application
+# 5. Copy the application
 COPY --chown=appuser:appuser . .
 
 # 6. Set environment variables
-ENV MODEL_PATH=/app/model/final_model_11_4_2025.keras
 ENV DEEPFACE_HOME=/tmp/.deepface
-ENV UPLOAD_FOLDER=/tmp/uploads
+ENV MODEL_DIR=/tmp/model
+ENV MODEL_PATH=/tmp/model/final_model_11_4_2025.keras
 
-# 7. Verify model file exists and is accessible
-RUN ls -la /app/model/ && \
-    [ -f "/app/model/final_model_11_4_2025.keras" ] || exit 1 && \
-    chmod -R a+r /app/model
+# 7. Verify directory permissions
+RUN chmod -R a+rwx /tmp/model && \
+    chmod -R a+rwx /tmp/.deepface
 
 USER 10014
 EXPOSE 8000
+
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "-k", "uvicorn.workers.UvicornWorker", "app:app"]
