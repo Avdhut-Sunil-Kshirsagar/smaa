@@ -1,33 +1,63 @@
-FROM python:3.9-slim
+# Stage 1: Build the application
+FROM python:3.11-slim-bookworm AS builder
 
-# 1. Create non-root user and required directories
-RUN mkdir -p /app && \
-    useradd -u 10014 -m appuser && \
-    mkdir -p /tmp/model && \
-    mkdir -p /tmp/uploads && \
-    mkdir -p /tmp/.deepface && \
-    chown -R appuser:appuser /app && \
-    chown -R appuser:appuser /tmp
+# Set environment variables
+ENV DEEPFACE_HOME=/tmp/.deepface \
+    UPLOAD_FOLDER=/tmp/uploads \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# 2. Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# Set work directory
 WORKDIR /app
 
-# 3. Install Python dependencies first (better caching)
-COPY --chown=appuser:appuser requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# 4. Copy the application
-COPY --chown=appuser:appuser . .
+# Copy application code
+COPY . .
 
-# 5. Set environment variables
-ENV DEEPFACE_HOME=/tmp/.deepface
-ENV UPLOAD_FOLDER=/tmp/uploads
+# Stage 2: Create a minimal runtime image
+FROM python:3.11-slim-bookworm
 
+# Set environment variables
+ENV DEEPFACE_HOME=/tmp/.deepface \
+    UPLOAD_FOLDER=/tmp/uploads \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -u 10014 -m appuser
+
+# Set work directory
+WORKDIR /app
+
+# Copy installed Python packages and application code from builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /app /app
+
+# Set ownership and permissions
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
 USER 10014
+
+# Expose the application's port
 EXPOSE 8000
+
+# Define the default command
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "-k", "uvicorn.workers.UvicornWorker", "app:app"]
