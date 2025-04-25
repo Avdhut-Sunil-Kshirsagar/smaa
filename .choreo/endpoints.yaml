@@ -4,5 +4,5 @@ endpoints:
     port: 8000
     type: REST
     networkVisibility: Public
-    context: /deepfake-api
+    context: /health
     schemaFilePath: openapi.yaml
