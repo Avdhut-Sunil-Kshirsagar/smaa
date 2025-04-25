@@ -1,16 +1,13 @@
-component:
-  name: deepfake-detector
-  type: rest
-  build:
-    commands:
-      # Clean up space before install
-      - rm -rf /var/lib/apt/lists/*
-      - pip install --no-cache-dir --no-warn-script-location -r requirements.txt
-      # Clean up after install
-      - find /usr/local/lib/python3.10 -type d -name "__pycache__" -exec rm -rf {} +
-      - rm -rf /tmp/*
-  deployment:
-    replicas: 1
+version: 0.1
+
+endpoints:
+  - name: Deepfake Detection API
+    port: 8000
+    type: REST
+    networkVisibility: Public
+    context: /deepfake-api
+    schemaFilePath: openapi.yaml
+    # Optional advanced configurations
     resources:
       requests:
         cpu: "2"
@@ -18,11 +15,15 @@ component:
       limits:
         cpu: "2"
         memory: "4Gi"
-    ports:
-      - containerPort: 8000
     livenessProbe:
       httpGet:
         path: /health
         port: 8000
       initialDelaySeconds: 30
       periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 8000
+      initialDelaySeconds: 15
+      periodSeconds: 5
