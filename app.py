@@ -1,7 +1,6 @@
 import sys
 import os
 os.environ['DEEPFACE_HOME'] = '/tmp/.deepface'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
   
 from fastapi import FastAPI, UploadFile, File, HTTPException
