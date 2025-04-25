@@ -1,62 +1,54 @@
+# Use multi-stage build to reduce final image size
 FROM python:3.9-slim as builder
 
-# Install build dependencies
+WORKDIR /app
+
+# Install system dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Install Python dependencies
 COPY requirements.txt .
+RUN pip install --user --no-cache-dir -r requirements.txt
 
-# Install dependencies in virtual environment
-RUN python -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
-
-# Final stage
+# Second stage - runtime image
 FROM python:3.9-slim
 
-# Install runtime dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 
-# Copy virtual environment from builder
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# Copy only necessary files from builder
+COPY --from=builder /root/.local /root/.local
+COPY --from=builder /app /app
 
-# Create non-root user
-RUN useradd -u 15000 -m appuser && \
-    mkdir -p /app && \
-    chown appuser:appuser /app
+# Copy application code
+COPY . .
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# Ensure scripts in .local are usable
+ENV PATH=/root/.local/bin:$PATH
+ENV PYTHONPATH=/app
+
+# Environment variables
 ENV DEEPFACE_HOME=/tmp/.deepface
 ENV TF_CPP_MIN_LOG_LEVEL=3
 ENV CUDA_VISIBLE_DEVICES=-1
-ENV TF_USE_LEGACY_KERAS=1
 
-WORKDIR /app
-COPY app.py .
+# Create directory for deepface cache
+RUN mkdir -p /tmp/.deepface
 
-# Set up temp directory
-RUN mkdir -p /tmp/.deepface && \
-    chmod -R 777 /tmp && \
-    chown -R appuser:appuser /tmp
+# Run as non-root user
+RUN useradd -m appuser && chown -R appuser /app
+USER appuser
 
-USER 15000
-
+# Expose port
 EXPOSE 8000
 
+# Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# Run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "60"]
