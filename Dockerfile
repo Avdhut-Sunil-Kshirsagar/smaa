@@ -9,10 +9,10 @@ ENV DEEPFACE_HOME=/tmp/.deepface \
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     libgl1-mesa-glx \
-    libglib2-0 \
+    libglib2.0-0 \  # Correct package name
     wget \
     && rm -rf /var/lib/apt/lists/*
-
+    
 # Create model directory and download
 RUN mkdir -p ${MODEL_DIR} && \
     wget -O "${MODEL_DIR}/final_model_11_4_2025.keras" \
