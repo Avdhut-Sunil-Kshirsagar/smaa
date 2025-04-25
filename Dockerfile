@@ -1,49 +1,34 @@
-# Use official Python image with specific version for security
-FROM python:3.10-slim-bullseye
+# Use an official Python runtime as a parent image
+FROM python:3.10-slim
 
 # Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    DEEPFACE_HOME=/tmp/.deepface \
-    TF_CPP_MIN_LOG_LEVEL=3 \
-    CUDA_VISIBLE_DEVICES=-1 \
-    PIP_NO_CACHE_DIR=1
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV DEEPFACE_HOME=/tmp/.deepface
+ENV TF_CPP_MIN_LOG_LEVEL=3
+ENV CUDA_VISIBLE_DEVICES=-1
 
 # Create and set working directory
 WORKDIR /app
 
-# Install system dependencies with cleanup
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
     build-essential \
-    libgl1 \
-    libglib2.0-0 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
+# Copy requirements file first to leverage Docker cache
 COPY requirements.txt .
 
-# Install Python dependencies securely
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    rm -rf /root/.cache/pip
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy the rest of the application
 COPY . .
 
-# Create non-root user and set permissions
-RUN useradd -m appuser && \
-    chown -R appuser:appuser /app
-
-USER appuser
-
-# Expose port
+# Expose the port the app runs on
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s \
-    CMD curl -f http://localhost:8000/health || exit 1
-
-# Run application
+# Command to run the application
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
