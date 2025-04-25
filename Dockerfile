@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y \
 RUN useradd -m -u 15000 deepfakeuser
 
 # Set the user to be the non-root user
-USER deepfakeuser
+USER 15000 
 
 # Set the working directory for the app
 WORKDIR /app
