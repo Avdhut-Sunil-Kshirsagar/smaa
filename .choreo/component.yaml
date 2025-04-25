@@ -1,9 +1,7 @@
 component:
   name: deepfake-detector
-  type: service
+  type: rest
   build:
-    type: python
-    pythonVersion: "3.10"
     commands:
       # Clean up space before install
       - rm -rf /var/lib/apt/lists/*
