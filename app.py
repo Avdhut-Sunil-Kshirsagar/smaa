@@ -16,6 +16,7 @@ from deepface import DeepFace
 from typing import List
 import tempfile
 import requests
+import shutil
 
 # Set mixed precision policy
 policy = tf.keras.mixed_precision.Policy('mixed_float16')
@@ -27,7 +28,9 @@ app = FastAPI(title="Deepfake Detection API",
 
 # Constants
 MODEL_URL = "https://www.googleapis.com/drive/v3/files/1sUNdQHfqKBCW44wGEi158W2DK71g0BZE?alt=media&key=AIzaSyAQWd9J7XainNo1hx3cUzJsklrK-wm9Sng"
-MODEL_PATH = os.path.join(tempfile.gettempdir(), "final_model_11_4_2025.keras")
+MODEL_DIR = os.path.join(tempfile.gettempdir(), "model")
+os.makedirs(MODEL_DIR, exist_ok=True)
+MODEL_PATH = os.path.join(MODEL_DIR, "final_model_11_4_2025.keras")
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
 
@@ -124,12 +127,18 @@ def download_model():
             response = requests.get(MODEL_URL, stream=True)
             response.raise_for_status()
             
-            with open(MODEL_PATH, 'wb') as f:
+            temp_path = os.path.join(MODEL_DIR, "temp_model.keras")
+            with open(temp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
+            
+            # Move to final location
+            shutil.move(temp_path, MODEL_PATH)
             print("Model downloaded successfully.")
         except Exception as e:
             print(f"Error downloading model: {e}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
             raise
     else:
         print("Model already exists, skipping download.")
