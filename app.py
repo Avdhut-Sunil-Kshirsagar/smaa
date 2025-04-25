@@ -12,18 +12,30 @@ import numpy as np
 import cv2
 import imghdr
 from deepface import DeepFace
-from typing import List
+from typing import List, Dict, Optional, Union
 import tempfile
 import requests
 from fastapi.openapi.utils import get_openapi
+from pydantic import BaseModel, Field
+from typing_extensions import Annotated
 
 # Set mixed precision policy
 policy = tf.keras.mixed_precision.Policy('mixed_float16')
 tf.keras.mixed_precision.set_global_policy(policy)
 
-app = FastAPI(title="Deepfake Detection API",
-              description="API for detecting deepfake, real and AI-generated images",
-              version="1.0")
+app = FastAPI(
+    title="Deepfake Detection API",
+    description="API for detecting deepfake, real and AI-generated images",
+    version="1.0",
+    contact={
+        "name": "API Support",
+        "email": "support@example.com"
+    },
+    license_info={
+        "name": "Apache 2.0",
+        "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
+    }
+)
 
 # Constants
 MODEL_URL = "https://www.googleapis.com/drive/v3/files/1sUNdQHfqKBCW44wGEi158W2DK71g0BZE?alt=media&key=AIzaSyAQWd9J7XainNo1hx3cUzJsklrK-wm9Sng"
@@ -31,6 +43,27 @@ MODEL_DIR = os.path.join(os.getenv('MODEL_DIR', '/app/model'))
 MODEL_PATH = os.path.join(MODEL_DIR, "final_model_11_4_2025.keras")
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
+
+# Pydantic Models
+class PredictionResult(BaseModel):
+    filename: str
+    class_: str = Field(..., alias="class", description="Classification result", example="REAL")
+    confidence: float = Field(..., ge=0, le=1, description="Confidence score", example=0.95)
+    probabilities: Dict[str, float] = Field(
+        ..., 
+        description="Probability distribution across classes",
+        example={"AI": 0.02, "FAKE": 0.03, "REAL": 0.95}
+    )
+    error: Optional[str] = Field(None, description="Error message if processing failed")
+
+    class Config:
+        allow_population_by_field_name = True
+
+class HealthCheckResponse(BaseModel):
+    status: str = Field(..., description="Service status", example="healthy")
+    model_loaded: bool = Field(..., description="Whether model is loaded", example=True)
+    model_path: Optional[str] = Field(None, description="Path to model file")
+    model_exists: Optional[bool] = Field(None, description="Whether model file exists")
 
 # Custom layers
 class EfficientChannelAttention(layers.Layer):
@@ -122,13 +155,14 @@ def download_model():
     if not os.path.exists(MODEL_PATH):
         print("Downloading model...")
         try:
+            os.makedirs(MODEL_DIR, exist_ok=True)
             response = requests.get(MODEL_URL, stream=True)
             response.raise_for_status()
             
             with open(MODEL_PATH, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
-            print("Model downloaded successfully.")
+            print(f"Model downloaded successfully to {MODEL_PATH}")
         except Exception as e:
             print(f"Error downloading model: {e}")
             raise
@@ -136,6 +170,9 @@ def download_model():
         print("Model already exists, skipping download.")
 
 def load_model():
+    if not os.path.exists(MODEL_PATH):
+        raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
+    
     custom_objects = {
         'EfficientChannelAttention': EfficientChannelAttention,
         'FixedSpatialAttention': FixedSpatialAttention,
@@ -157,6 +194,8 @@ class FaceCropper:
             if len(faces) == 0:
                 print("No face detected, using full image as cropped face.")
                 full_img = cv2.imread(image_path)
+                if full_img is None:
+                    raise ValueError("Failed to read image file")
                 cropped_face = cv2.resize(full_img, target_size)
             else:
                 cropped_face = faces[0]['face']
@@ -174,7 +213,7 @@ class FaceCropper:
 def is_valid_image(file_bytes):
     try:
         image_type = imghdr.what(None, h=file_bytes)
-        return image_type in ['jpeg','jpg', 'png', 'bmp']
+        return image_type in ['jpeg', 'jpg', 'png', 'bmp']
     except:  
         return False
 
@@ -187,7 +226,8 @@ def preprocess_image(file_path, target_size=(224, 224)):
             img = tf.image.decode_image(img, channels=3, expand_animations=False)
         img = tf.image.convert_image_dtype(img, tf.float32)
         return tf.image.resize(img, target_size).numpy()
-    except:
+    except Exception as e:
+        print(f"Error preprocessing image: {e}")
         return np.zeros((*target_size, 3), dtype=np.float32)
 
 @app.on_event("startup")
@@ -199,21 +239,42 @@ async def startup_event():
         print("Model and face cropper initialized successfully.")
     except Exception as e:
         print(f"Error during startup: {e}")
-        raise
+        raise RuntimeError(f"Failed to initialize service: {e}")
 
-@app.post("/predict", response_model=List[dict])
-async def predict(files: List[UploadFile] = File(...)):
-    results = []
+@app.post("/predict", 
+          response_model=List[PredictionResult],
+          responses={
+              400: {"description": "Invalid input (no files or invalid format)"},
+              500: {"description": "Internal server error"}
+          })
+async def predict(files: List[UploadFile] = File(..., description="Image files to analyze")):
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one image file is required")
     
+    results = []
     for file in files:
+        result = {
+            "filename": file.filename,
+            "class": None,
+            "confidence": None,
+            "probabilities": None,
+            "error": None
+        }
+        
         try:
             # Validate image
             file_bytes = await file.read()
             if not is_valid_image(file_bytes):
-                raise HTTPException(status_code=400, detail=f"Invalid image file: {file.filename}")
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Invalid image format for {file.filename}. Supported: JPEG, PNG, BMP"
+                )
             
             # Save to temp file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as temp_file:
+            with tempfile.NamedTemporaryFile(
+                delete=False, 
+                suffix=os.path.splitext(file.filename)[1]
+            ) as temp_file:
                 temp_file.write(file_bytes)
                 temp_path = temp_file.name
             
@@ -223,49 +284,85 @@ async def predict(files: List[UploadFile] = File(...)):
                 face_img = app.state.cropper.safe_crop(temp_path, TARGET_SIZE)
                 
                 # Make prediction
-                prediction = app.state.model.predict([np.array([full_img]), np.array([face_img])])[0]
+                prediction = app.state.model.predict([
+                    np.array([full_img]), 
+                    np.array([face_img])
+                ])[0]
                 
-                predicted_class = CLASS_NAMES[np.argmax(prediction)]
-                confidence = float(np.max(prediction))
-                
-                results.append({
-                    "filename": file.filename,
-                    "class": predicted_class,
-                    "confidence": confidence,
-                    "probabilities": {name: float(prob) for name, prob in zip(CLASS_NAMES, prediction)}
+                # Convert to Python native types
+                result.update({
+                    "class": CLASS_NAMES[np.argmax(prediction)],
+                    "confidence": float(np.max(prediction)),
+                    "probabilities": {
+                        name: float(prob) 
+                        for name, prob in zip(CLASS_NAMES, prediction)
+                    }
                 })
-            finally:
-                os.unlink(temp_path)
                 
+            except Exception as e:
+                result["error"] = f"Processing error: {str(e)}"
+                
+            finally:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                    
+        except HTTPException as e:
+            result["error"] = str(e.detail)
         except Exception as e:
-            results.append({
-                "filename": file.filename,
-                "error": str(e)
-            })
+            result["error"] = f"Unexpected error: {str(e)}"
+            
+        results.append(result)
     
     return results
 
-@app.get("/health")
+@app.get("/health", 
+         response_model=HealthCheckResponse,
+         responses={
+             503: {"description": "Service unavailable"}
+         })
 async def health_check():
-    return {"status": "healthy", "model_loaded": hasattr(app.state, "model")}
+    try:
+        return {
+            "status": "healthy",
+            "model_loaded": hasattr(app.state, "model"),
+            "model_path": MODEL_PATH,
+            "model_exists": os.path.exists(MODEL_PATH)
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service unavailable: {str(e)}"
+        )
 
-
-
-# Generate OpenAPI schema
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
+    
     openapi_schema = get_openapi(
-        title="Deepfake Detection API",
-        version="1.0.0",
-        description="API for detecting deepfake, real and AI-generated images",
+        title=app.title,
+        version=app.version,
+        description=app.description,
         routes=app.routes,
+        contact=app.contact,
+        license_info=app.license_info
     )
+    
+    # Add servers
+    openapi_schema["servers"] = [
+        {
+            "url": "http://localhost:8000",
+            "description": "Local development server"
+        },
+        {
+            "url": "https://dff47398-ad64-430a-956d-ee6c36ac85ea-dev.e1-us-east-azure.choreoapis.dev/default/smaa/v1.0",
+            "description": "Production server"
+        }
+    ]
+    
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
 app.openapi = custom_openapi
-
 
 if __name__ == "__main__":
     import uvicorn
