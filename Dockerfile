@@ -7,6 +7,9 @@ ENV PYTHONUNBUFFERED 1
 ENV DEEPFACE_HOME=/tmp/.deepface
 ENV TF_CPP_MIN_LOG_LEVEL=3
 ENV CUDA_VISIBLE_DEVICES=-1
+ENV APP_USER=appuser
+ENV APP_UID=15000
+ENV APP_GID=15000
 
 # Create and set working directory
 WORKDIR /app
@@ -18,14 +21,26 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# Create non-root user and group with fixed UID/GID between 10000-20000
+RUN groupadd -g $APP_GID $APP_USER && \
+    useradd -u $APP_UID -g $APP_GID -s /bin/bash -d /home/$APP_USER $APP_USER && \
+    mkdir -p /home/$APP_USER && \
+    chown -R $APP_UID:$APP_GID /home/$APP_USER
+
 # Copy requirements file first to leverage Docker cache
-COPY requirements.txt .
+COPY --chown=$APP_UID:$APP_GID requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application
-COPY . .
+COPY --chown=$APP_UID:$APP_GID . .
+
+# Ensure the user has write access to the temporary directory
+RUN chown -R $APP_UID:$APP_GID /tmp
+
+# Switch to non-root user
+USER $APP_USER
 
 # Expose the port the app runs on
 EXPOSE 8000
