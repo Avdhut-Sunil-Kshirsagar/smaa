@@ -173,8 +173,8 @@ class FaceCropper:
 def is_valid_image(file_bytes):
     try:
         image_type = imghdr.what(None, h=file_bytes)
-        return image_type in ['jpeg', 'png', 'bmp']
-    except:
+        return image_type in ['jpeg','jpg', 'png', 'bmp']
+    except:  
         return False
 
 def preprocess_image(file_path, target_size=(224, 224)):
