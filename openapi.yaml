@@ -1,1 +1,59 @@
-
+openapi: 3.0.0
+info:
+  title: Deepfake Detection API
+  description: API for detecting deepfake, real and AI-generated images
+  version: 1.0.0
+servers:
+  - url: https://gateway.choreo.dev/deepfake-api
+paths:
+  /predict:
+    post:
+      summary: Analyze images for deepfake detection
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        '200':
+          description: Successful analysis
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    filename:
+                      type: string
+                    class:
+                      type: string
+                      enum: [AI, FAKE, REAL]
+                    confidence:
+                      type: number
+                      format: float
+                    probabilities:
+                      type: object
+                      properties:
+                        AI:
+                          type: number
+                          format: float
+                        FAKE:
+                          type: number
+                          format: float
+                        REAL:
+                          type: number
+                          format: float
+  /health:
+    get:
+      summary: Health check endpoint
+      responses:
+        '200':
+          description: Service is healthy
