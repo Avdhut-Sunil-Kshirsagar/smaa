@@ -1,63 +1,47 @@
-# Stage 1: Build the application
+# Stage 1: Builder
 FROM python:3.11-slim-bookworm AS builder
 
 # Set environment variables
-ENV DEEPFACE_HOME=/tmp/.deepface \
-    UPLOAD_FOLDER=/tmp/uploads \
+ENV VIRTUAL_ENV=/opt/venv \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libgl1 \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+# Install required system packages
+RUN apt-get update && \
+    apt-get install -y build-essential libgl1-mesa-glx && \
+    rm -rf /var/lib/apt/lists/*
 
-# Set work directory
-WORKDIR /app
+# Create virtual environment
+RUN python -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Copy application code
-COPY . .
-
-# Stage 2: Create a minimal runtime image
+# Stage 2: Final runtime image
 FROM python:3.11-slim-bookworm
 
-# Set environment variables
-ENV DEEPFACE_HOME=/tmp/.deepface \
-    UPLOAD_FOLDER=/tmp/uploads \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-
 # Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y libgl1-mesa-glx && \
+    rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Create a non-root user
 RUN useradd -u 10014 -m appuser
+USER appuser
 
-# Set work directory
 WORKDIR /app
 
-# Copy installed Python packages and application code from builder
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /app /app
+# Copy application code
+COPY . /app
 
-# Set ownership and permissions
-RUN chown -R appuser:appuser /app
-
-# Switch to non-root user
-USER 10014
-
-# Expose the application's port
+# Expose the port your app runs on
 EXPOSE 8000
 
-# Define the default command
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "-k", "uvicorn.workers.UvicornWorker", "app:app"]
+# Run your app (edit if using Flask, FastAPI, etc.)
+CMD ["python", "app.py"]
