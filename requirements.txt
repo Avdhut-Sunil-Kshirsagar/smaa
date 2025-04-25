@@ -1,9 +1,10 @@
-fastapi==0.109.2
-uvicorn==0.27.1
-click==8.1.7  # Explicitly add click
-tensorflow-cpu==2.15.0
-numpy==1.26.4
-opencv-python-headless==4.10.0.84
-deepface==0.0.79
-requests==2.31.0
-python-multipart==0.0.7
+fastapi==0.115.12
+uvicorn==0.34.1
+tensorflow==2.19.0
+deepface==0.0.93
+opencv-python-headless==4.11.0.86
+numpy==2.1.3
+requests==2.32.3
+pillow==11.2.1
+python-multipart==0.0.20
+gdown==5.2.0
