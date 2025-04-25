@@ -3,7 +3,7 @@ uvicorn==0.34.1
 tensorflow==2.19.0
 deepface==0.0.93
 opencv-python-headless==4.11.0.86
-numpy==2.1.3
+numpy==1.26.4  # Changed from 2.1.3 to compatible version
 requests==2.32.3
 pillow==11.2.1
 python-multipart==0.0.20
