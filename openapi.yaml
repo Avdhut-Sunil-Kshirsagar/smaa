@@ -1,0 +1,87 @@
+openapi: 3.0.3
+info:
+  title: Deepfake Detection API
+  description: API for detecting deepfake, real and AI-generated images
+  version: 1.0.0
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+
+paths:
+  /predict:
+    post:
+      summary: Detect deepfake images
+      operationId: predict_images
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        '200':
+          description: Successful detection
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PredictionResult"
+        '400':
+          description: Invalid input
+          
+  /health:
+    get:
+      summary: Service health check
+      operationId: health_check
+      responses:
+        '200':
+          description: Service status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthCheckResponse"
+
+components:
+  schemas:
+    PredictionResult:
+      type: object
+      properties:
+        filename:
+          type: string
+        class:
+          type: string
+          enum: [AI, FAKE, REAL]
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        probabilities:
+          type: object
+          additionalProperties:
+            type: number
+            format: float
+            minimum: 0
+            maximum: 1
+        error:
+          type: string
+          nullable: true
+          
+    HealthCheckResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        model_loaded:
+          type: boolean
+        model_path:
+          type: string
+        model_exists:
+          type: boolean
