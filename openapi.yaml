@@ -6,6 +6,8 @@ info:
 servers:
   - url: http://localhost:8000
     description: Local development server
+  - url: https://dff47398-ad64-430a-956d-ee6c36ac85ea-dev.e1-us-east-azure.choreoapis.dev/default/smaa/v1.0
+    description: Local development server
 
 paths:
   /predict:
