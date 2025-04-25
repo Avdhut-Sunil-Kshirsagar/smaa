@@ -1,70 +1,119 @@
 openapi: 3.0.3
 info:
   title: Deepfake Detection API
-  description: API for detecting deepfake, real and AI-generated images
+  description: |
+    API for detecting deepfake, real and AI-generated images.
+    Provides endpoints for image analysis and service health monitoring.
   version: 1.0.0
+  contact:
+    name: API Support
+    email: support@example.com
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
 servers:
   - url: http://localhost:8000
     description: Local development server
   - url: https://dff47398-ad64-430a-956d-ee6c36ac85ea-dev.e1-us-east-azure.choreoapis.dev/default/smaa/v1.0
-    description: Local development server
+    description: Choreo production endpoint
 
 paths:
   /predict:
     post:
-      summary: Detect deepfake images
+      summary: Analyze images for deepfake detection
+      description: |
+        Accepts one or more image files and returns analysis results indicating
+        whether each image is classified as REAL, FAKE, or AI-generated.
       operationId: predict_images
+      tags:
+        - Analysis
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
               type: object
+              required:
+                - files
               properties:
                 files:
                   type: array
+                  minItems: 1
                   items:
                     type: string
                     format: binary
+                  description: One or more image files to analyze
       responses:
         '200':
-          description: Successful detection
+          description: Successful analysis
           content:
             application/json:
               schema:
                 type: array
                 items:
                   $ref: "#/components/schemas/PredictionResult"
+              example:
+                - filename: "image1.jpg"
+                  class: "REAL"
+                  confidence: 0.92
+                  probabilities:
+                    AI: 0.05
+                    FAKE: 0.03
+                    REAL: 0.92
+                  error: null
         '400':
-          description: Invalid input
+          description: Invalid input (e.g., no files provided or invalid image format)
+        '500':
+          description: Internal server error
           
   /health:
     get:
-      summary: Service health check
+      summary: Service health status
+      description: Returns the current health status of the service including model loading information
       operationId: health_check
+      tags:
+        - Monitoring
       responses:
         '200':
-          description: Service status
+          description: Service health information
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthCheckResponse"
+              example:
+                status: "healthy"
+                model_loaded: true
+                model_path: "/app/model/final_model_11_4_2025.keras"
+                model_exists: true
+        '503':
+          description: Service unavailable (when critical components are not ready)
 
 components:
   schemas:
     PredictionResult:
       type: object
+      required:
+        - filename
+        - class
+        - confidence
       properties:
         filename:
           type: string
+          description: Original filename of the analyzed image
+          example: "example.jpg"
         class:
           type: string
           enum: [AI, FAKE, REAL]
+          description: Classification result
+          example: "REAL"
         confidence:
           type: number
           format: float
           minimum: 0
           maximum: 1
+          description: Confidence score of the prediction
+          example: 0.92
         probabilities:
           type: object
           additionalProperties:
@@ -72,18 +121,43 @@ components:
             format: float
             minimum: 0
             maximum: 1
+          description: Probability distribution across all classes
+          example:
+            AI: 0.05
+            FAKE: 0.03
+            REAL: 0.92
         error:
           type: string
           nullable: true
+          description: Error message if processing failed for this file
+          example: "Invalid image format"
           
     HealthCheckResponse:
       type: object
+      required:
+        - status
+        - model_loaded
       properties:
         status:
           type: string
+          enum: [healthy, unhealthy]
+          description: Overall service health status
+          example: "healthy"
         model_loaded:
           type: boolean
+          description: Whether the ML model is loaded in memory
+          example: true
         model_path:
           type: string
+          description: Filesystem path to the model file
+          example: "/app/model/final_model_11_4_2025.keras"
         model_exists:
           type: boolean
+          description: Whether the model file exists on disk
+          example: true
+
+tags:
+  - name: Analysis
+    description: Image analysis operations
+  - name: Monitoring
+    description: Service health monitoring
