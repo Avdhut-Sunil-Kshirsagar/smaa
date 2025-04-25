@@ -1,49 +1,41 @@
-# Use an official Python runtime as a parent image
-FROM python:3.10-slim
+FROM python:3.9-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-ENV DEEPFACE_HOME=/tmp/.deepface
-ENV TF_CPP_MIN_LOG_LEVEL=3
-ENV CUDA_VISIBLE_DEVICES=-1
-ENV APP_USER=appuser
-ENV APP_UID=15000
-ENV APP_GID=15000
+# 1. Create non-root user and required directories
+RUN useradd -u 10014 -m appuser && \
+    mkdir -p /app/model && \
+    mkdir -p /tmp/uploads && \
+    mkdir -p /tmp/.deepface && \
+    chown -R appuser:appuser /app && \
+    chown -R appuser:appuser /tmp
 
-# Create and set working directory
-WORKDIR /app
-
-# Install system dependencies
+# 2. Install system dependencies
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user and group with fixed UID/GID between 10000-20000
-RUN groupadd -g $APP_GID $APP_USER && \
-    useradd -u $APP_UID -g $APP_GID -s /bin/bash -d /home/$APP_USER $APP_USER && \
-    mkdir -p /home/$APP_USER && \
-    chown -R $APP_UID:$APP_GID /home/$APP_USER
+WORKDIR /app
 
-# Copy requirements file first to leverage Docker cache
-COPY --chown=$APP_UID:$APP_GID requirements.txt .
-
-# Install Python dependencies
+# 3. Install Python dependencies first (better caching)
+COPY --chown=appuser:appuser requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application
-COPY --chown=$APP_UID:$APP_GID . .
+# 4. Copy model file separately (large file optimization)
+COPY --chown=appuser:appuser model/final_model_11_4_2025.keras /app/model/
 
-# Ensure the user has write access to the temporary directory
-RUN chown -R $APP_UID:$APP_GID /tmp
+# 5. Copy the rest of the application
+COPY --chown=appuser:appuser . .
 
-# Switch to non-root user
-USER $APP_USER
+# 6. Set environment variables
+ENV MODEL_PATH=/app/model/final_model_11_4_2025.keras
+ENV DEEPFACE_HOME=/tmp/.deepface
+ENV UPLOAD_FOLDER=/tmp/uploads
 
-# Expose the port the app runs on
+# 7. Verify model file exists and is accessible
+RUN ls -la /app/model/ && \
+    [ -f "/app/model/final_model_11_4_2025.keras" ] || exit 1 && \
+    chmod -R a+r /app/model
+
+USER 10014
 EXPOSE 8000
-
-# Command to run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "-k", "uvicorn.workers.UvicornWorker", "app:app"]
