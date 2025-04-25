@@ -1,8 +1,22 @@
-version: 0.1
-endpoints:
-  - name: Deepfake Detection Endpoint
-    port: 8000
-    type: REST
-    networkVisibility: Public
-    context: /health
-    schemaFilePath: openapi.yaml
+version: 1.2
+component:
+  name: deepfake-detector
+  type: service
+  language: python
+  build:
+    builder: docker
+    dockerfile: Dockerfile
+    context: .
+  
+  endpoints:
+    - name: deepfake-api
+      port: 8000
+      protocol: http
+      networkVisibility: public
+      routes:
+        - path: /deepfake-api
+          schema:
+            path: openapi.yaml
+          implementation:
+            method: ALL
+            pathPrefix: /deepfake-api
