@@ -1,5 +1,5 @@
-# Use the official Python 3.8 slim image as a base
-FROM python:3.8-slim
+# Use the official Python 3.10 slim image as a base
+FROM python:3.10-slim
 
 # Set environment variables
 ENV DEEPFACE_HOME="/tmp/.deepface"
