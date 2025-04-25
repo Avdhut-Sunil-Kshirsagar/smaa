@@ -3,7 +3,6 @@ FROM python:3.10-slim
 # Set environment variables
 ENV DEEPFACE_HOME=/tmp/.deepface \
     CUDA_VISIBLE_DEVICES=-1 \
-    PYTHONUNBUFFERED=1 \
     MODEL_DIR=/app/model \
     PATH="/home/deepfakeuser/.local/bin:${PATH}"
 
