@@ -1,7 +1,8 @@
 FROM python:3.9-slim
 
 # 1. Create non-root user and required directories
-RUN useradd -u 10014 -m appuser && \
+RUN mkdir -p /app && \
+    useradd -u 10014 -m appuser && \
     mkdir -p /tmp/model && \
     mkdir -p /tmp/uploads && \
     mkdir -p /tmp/.deepface && \
