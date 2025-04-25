@@ -1,4 +1,4 @@
-# Use an official Python runtime with a specific secure version
+# Use official Python image with specific version for security
 FROM python:3.10-slim-bullseye
 
 # Set environment variables
@@ -7,13 +7,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DEEPFACE_HOME=/tmp/.deepface \
     TF_CPP_MIN_LOG_LEVEL=3 \
     CUDA_VISIBLE_DEVICES=-1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_NO_CACHE_DIR=1
 
 # Create and set working directory
 WORKDIR /app
 
-# Install system dependencies securely
+# Install system dependencies with cleanup
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -22,27 +21,29 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first to leverage Docker cache
+# Copy requirements first for better caching
 COPY requirements.txt .
 
 # Install Python dependencies securely
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
-    pip cache purge
+    rm -rf /root/.cache/pip
 
-# Copy the rest of the application
+# Copy application code
 COPY . .
 
-# Create a non-root user and switch to it
-RUN useradd -m appuser && chown -R appuser:appuser /app
+# Create non-root user and set permissions
+RUN useradd -m appuser && \
+    chown -R appuser:appuser /app
+
 USER appuser
 
-# Expose the port the app runs on
+# Expose port
 EXPOSE 8000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=30s \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Command to run the application
+# Run application
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
