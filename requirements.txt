@@ -4,4 +4,6 @@ tensorflow
 deepface
 opencv-python-headless
 numpy
+keras>=2.13.1rc0
+
 
