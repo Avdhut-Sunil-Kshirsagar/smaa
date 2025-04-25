@@ -1,8 +1,12 @@
-version: 1.2
+schemaVersion: "1.2"
 endpoints:
-  - name: Deepfake Detection Endpoint
-    port: 8000
-    type: REST
-    networkVisibility: Public
-    context: /health
-    schemaFilePath: openapi.yaml
+    - name: deepfake-detection-endpoint-036
+      displayName: Deepfake Detection Endpoint
+      service:
+        basePath: /health
+        port: 8000
+      type: REST
+      networkVisibilities:
+        - Project
+        - Public
+      schemaFilePath: openapi.yaml
