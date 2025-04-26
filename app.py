@@ -75,22 +75,20 @@ class HealthCheckResponse(BaseModel):
     model_path: Optional[str] = Field(None, description="Path to model file")
     model_exists: Optional[bool] = Field(None, description="Whether model file exists")
 
-# Custom layers with fixed precision handling
+# Custom layers with proper serialization
 class EfficientChannelAttention(layers.Layer):
     def __init__(self, channels, reduction=8, **kwargs):
         super().__init__(**kwargs)
         self.channels = channels
         self.reduction = reduction
-        
-        self.avg_pool = layers.GlobalAveragePooling2D(dtype='float32')
-        self.max_pool = layers.GlobalMaxPooling2D(dtype='float32')
+        self.avg_pool = layers.GlobalAveragePooling2D()
+        self.max_pool = layers.GlobalMaxPooling2D()
         self.fc = models.Sequential([
-            layers.Dense(channels//reduction, activation='relu', dtype='float32'),
-            layers.Dense(channels, activation='sigmoid', dtype='float32')
+            layers.Dense(channels//reduction, activation='relu'),
+            layers.Dense(channels, activation='sigmoid')
         ])
         
     def call(self, x):
-        x = tf.cast(x, tf.float32)
         avg_out = self.fc(self.avg_pool(x))
         max_out = self.fc(self.max_pool(x))
         out = avg_out + max_out
@@ -110,10 +108,9 @@ class EfficientChannelAttention(layers.Layer):
 class FixedSpatialAttention(layers.Layer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.conv = layers.Conv2D(1, 7, padding='same', activation='sigmoid', dtype='float32')
+        self.conv = layers.Conv2D(1, 7, padding='same', activation='sigmoid')
         
     def call(self, inputs):
-        inputs = tf.cast(inputs, tf.float32)
         avg_out = tf.reduce_mean(inputs, axis=3, keepdims=True)
         max_out = tf.reduce_max(inputs, axis=3, keepdims=True)
         concat = tf.concat([avg_out, max_out], axis=3)
@@ -130,24 +127,22 @@ class FixedHybridBlock(layers.Layer):
     def __init__(self, filters, **kwargs):
         super().__init__(**kwargs)
         self.filters = filters
-        
-        self.conv1 = layers.Conv2D(filters, 3, padding='same', dtype='float32')
-        self.conv2 = layers.Conv2D(filters, 3, padding='same', dtype='float32')
+        self.conv1 = layers.Conv2D(filters, 3, padding='same')
+        self.conv2 = layers.Conv2D(filters, 3, padding='same')
         self.eca = EfficientChannelAttention(filters)
         self.sa = FixedSpatialAttention()
-        self.norm1 = layers.BatchNormalization(dtype='float32')
-        self.norm2 = layers.BatchNormalization(dtype='float32')
-        self.act = layers.Activation('swish', dtype='float32')
+        self.norm1 = layers.BatchNormalization()
+        self.norm2 = layers.BatchNormalization()
+        self.act = layers.Activation('swish')
         self.res_conv = None
 
     def build(self, input_shape):
         if input_shape[-1] != self.filters:
-            self.res_conv = layers.Conv2D(self.filters, 1, dtype='float32')
+            self.res_conv = layers.Conv2D(self.filters, 1)
+        super().build(input_shape)
 
     def call(self, inputs):
-        inputs = tf.cast(inputs, tf.float32)
         residual = inputs
-        
         if self.res_conv is not None:
             residual = self.res_conv(inputs)
             
@@ -201,10 +196,6 @@ def load_model():
         'FixedHybridBlock': FixedHybridBlock
     }
     
-    # Load with float32 policy to avoid mixed precision issues
-    original_policy = tf.keras.mixed_precision.global_policy()
-    tf.keras.mixed_precision.set_global_policy('float32')
-    
     try:
         model = tf.keras.models.load_model(
             MODEL_PATH, 
@@ -212,7 +203,7 @@ def load_model():
             compile=False
         )
         
-        # Warm up the model
+        # Build the model by running inference on dummy data
         dummy_input = [
             np.random.rand(1, *TARGET_SIZE, 3).astype(np.float32),
             np.random.rand(1, *TARGET_SIZE, 3).astype(np.float32)
@@ -220,8 +211,9 @@ def load_model():
         model.predict(dummy_input, batch_size=1)
         
         return model
-    finally:
-        tf.keras.mixed_precision.set_global_policy(original_policy)
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        raise
 
 class FaceCropper:
     def __init__(self):
@@ -337,18 +329,9 @@ def process_single_file(file: UploadFile):
 async def startup_event():
     try:
         download_model()
-        
-        # Disable mixed precision during model loading
-        original_policy = tf.keras.mixed_precision.global_policy()
-        tf.keras.mixed_precision.set_global_policy('float32')
-        
         app.state.model = load_model()
         app.state.cropper = FaceCropper()
         app.state.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-        
-        # Restore original policy
-        tf.keras.mixed_precision.set_global_policy(original_policy)
-        
         logger.info(f"Service initialized with {MAX_WORKERS} workers")
     except Exception as e:
         logger.error(f"Error during startup: {e}")
