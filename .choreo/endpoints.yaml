@@ -1,8 +1,0 @@
-version: "1.2"
-endpoints:
-  - name: deepfake-detection-endpoint
-    port: 8000
-    type: REST
-    networkVisibility: Public
-    context: /health
-    schemaFilePath: openapi.yaml
