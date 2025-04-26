@@ -1,9 +1,9 @@
 import os
 os.environ['DEEPFACE_HOME'] = '/tmp/.deepface'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-os.environ['TF_NUM_INTEROP_THREADS'] = '8'  # Optimize for CPU
-os.environ['TF_NUM_INTRAOP_THREADS'] = '8'  # Optimize for CPU
-os.environ['OMP_NUM_THREADS'] = '8'  # Optimize for CPU
+os.environ['TF_NUM_INTEROP_THREADS'] = '8'
+os.environ['TF_NUM_INTRAOP_THREADS'] = '8'
+os.environ['OMP_NUM_THREADS'] = '8'
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -21,6 +21,7 @@ from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import asyncio
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -51,9 +52,9 @@ MODEL_DIR = os.path.join(os.getenv('MODEL_DIR', '/app/model'))
 MODEL_PATH = os.path.join(MODEL_DIR, "final_model_11_4_2025.keras")
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
-MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)  # Optimal worker count
+MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)
 
-# Pydantic Models (unchanged from original)
+# Pydantic Models
 class PredictionResult(BaseModel):
     filename: str
     class_: str = Field(..., alias="class", description="Classification result", example="REAL")
@@ -74,21 +75,22 @@ class HealthCheckResponse(BaseModel):
     model_path: Optional[str] = Field(None, description="Path to model file")
     model_exists: Optional[bool] = Field(None, description="Whether model file exists")
 
-# Custom layers (unchanged from original)
+# Custom layers with fixed precision handling
 class EfficientChannelAttention(layers.Layer):
     def __init__(self, channels, reduction=8, **kwargs):
         super().__init__(**kwargs)
         self.channels = channels
         self.reduction = reduction
         
-        self.avg_pool = layers.GlobalAveragePooling2D()
-        self.max_pool = layers.GlobalMaxPooling2D()
+        self.avg_pool = layers.GlobalAveragePooling2D(dtype='float32')
+        self.max_pool = layers.GlobalMaxPooling2D(dtype='float32')
         self.fc = models.Sequential([
-            layers.Dense(channels//reduction, activation='relu'),
-            layers.Dense(channels, activation='sigmoid')
+            layers.Dense(channels//reduction, activation='relu', dtype='float32'),
+            layers.Dense(channels, activation='sigmoid', dtype='float32')
         ])
         
     def call(self, x):
+        x = tf.cast(x, tf.float32)
         avg_out = self.fc(self.avg_pool(x))
         max_out = self.fc(self.max_pool(x))
         out = avg_out + max_out
@@ -102,12 +104,16 @@ class EfficientChannelAttention(layers.Layer):
         })
         return config
 
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
 class FixedSpatialAttention(layers.Layer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.conv = layers.Conv2D(1, 7, padding='same', activation='sigmoid')
+        self.conv = layers.Conv2D(1, 7, padding='same', activation='sigmoid', dtype='float32')
         
     def call(self, inputs):
+        inputs = tf.cast(inputs, tf.float32)
         avg_out = tf.reduce_mean(inputs, axis=3, keepdims=True)
         max_out = tf.reduce_max(inputs, axis=3, keepdims=True)
         concat = tf.concat([avg_out, max_out], axis=3)
@@ -117,25 +123,29 @@ class FixedSpatialAttention(layers.Layer):
     def get_config(self):
         return super().get_config()
 
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
 class FixedHybridBlock(layers.Layer):
     def __init__(self, filters, **kwargs):
         super().__init__(**kwargs)
         self.filters = filters
         
-        self.conv1 = layers.Conv2D(filters, 3, padding='same')
-        self.conv2 = layers.Conv2D(filters, 3, padding='same')
+        self.conv1 = layers.Conv2D(filters, 3, padding='same', dtype='float32')
+        self.conv2 = layers.Conv2D(filters, 3, padding='same', dtype='float32')
         self.eca = EfficientChannelAttention(filters)
         self.sa = FixedSpatialAttention()
-        self.norm1 = layers.BatchNormalization()
-        self.norm2 = layers.BatchNormalization()
-        self.act = layers.Activation('swish')
+        self.norm1 = layers.BatchNormalization(dtype='float32')
+        self.norm2 = layers.BatchNormalization(dtype='float32')
+        self.act = layers.Activation('swish', dtype='float32')
         self.res_conv = None
 
     def build(self, input_shape):
         if input_shape[-1] != self.filters:
-            self.res_conv = layers.Conv2D(self.filters, 1)
+            self.res_conv = layers.Conv2D(self.filters, 1, dtype='float32')
 
     def call(self, inputs):
+        inputs = tf.cast(inputs, tf.float32)
         residual = inputs
         
         if self.res_conv is not None:
@@ -159,6 +169,9 @@ class FixedHybridBlock(layers.Layer):
             'filters': self.filters
         })
         return config
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[1], input_shape[2], self.filters)
 
 def download_model():
     if not os.path.exists(MODEL_PATH):
@@ -188,21 +201,27 @@ def load_model():
         'FixedHybridBlock': FixedHybridBlock
     }
     
-    # Load with optimized settings for CPU
-    model = tf.keras.models.load_model(
-        MODEL_PATH, 
-        custom_objects=custom_objects,
-        compile=False
-    )
+    # Load with float32 policy to avoid mixed precision issues
+    original_policy = tf.keras.mixed_precision.global_policy()
+    tf.keras.mixed_precision.set_global_policy('float32')
     
-    # Warm up the model
-    dummy_input = [
-        np.random.rand(1, *TARGET_SIZE, 3).astype(np.float32),
-        np.random.rand(1, *TARGET_SIZE, 3).astype(np.float32)
-    ]
-    model.predict(dummy_input, batch_size=1)
-    
-    return model
+    try:
+        model = tf.keras.models.load_model(
+            MODEL_PATH, 
+            custom_objects=custom_objects,
+            compile=False
+        )
+        
+        # Warm up the model
+        dummy_input = [
+            np.random.rand(1, *TARGET_SIZE, 3).astype(np.float32),
+            np.random.rand(1, *TARGET_SIZE, 3).astype(np.float32)
+        ]
+        model.predict(dummy_input, batch_size=1)
+        
+        return model
+    finally:
+        tf.keras.mixed_precision.set_global_policy(original_policy)
 
 class FaceCropper:
     def __init__(self):
@@ -213,15 +232,12 @@ class FaceCropper:
 
     def safe_crop(self, image_path, target_size=(224, 224)):
         try:
-            # Use OpenCV directly for faster image loading
             img = cv2.imread(image_path)
             if img is None:
                 raise ValueError("Failed to read image file")
             
-            # Convert to RGB (what DeepFace expects)
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             
-            # Try face detection
             try:
                 faces = DeepFace.extract_faces(
                     img_path=img_rgb,
@@ -253,16 +269,13 @@ def is_valid_image(file_bytes):
 
 def preprocess_image(file_path, target_size=(224, 224)):
     try:
-        # Use OpenCV for faster image loading
         img = cv2.imread(file_path)
         if img is None:
             raise ValueError("Failed to read image file")
         
-        # Convert to float32 and normalize
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
         
-        # Resize using OpenCV (faster than tf.image.resize)
         return cv2.resize(img, target_size)
     except Exception as e:
         logger.error(f"Error preprocessing image: {e}")
@@ -278,13 +291,11 @@ def process_single_file(file: UploadFile):
     }
     
     try:
-        # Validate image
         file_bytes = file.file.read()
         if not is_valid_image(file_bytes):
             result["error"] = f"Invalid image format for {file.filename}. Supported: JPEG, PNG, BMP"
             return result
         
-        # Save to temp file
         with tempfile.NamedTemporaryFile(
             delete=False, 
             suffix=os.path.splitext(file.filename)[1]
@@ -293,17 +304,14 @@ def process_single_file(file: UploadFile):
             temp_path = temp_file.name
         
         try:
-            # Preprocess images
             full_img = preprocess_image(temp_path, TARGET_SIZE)
             face_img = app.state.cropper.safe_crop(temp_path, TARGET_SIZE)
             
-            # Make prediction
             prediction = app.state.model.predict([
                 np.array([full_img]), 
                 np.array([face_img])
             ], batch_size=1)[0]
             
-            # Convert to Python native types
             result.update({
                 "class": CLASS_NAMES[np.argmax(prediction)],
                 "confidence": float(np.max(prediction)),
@@ -329,9 +337,18 @@ def process_single_file(file: UploadFile):
 async def startup_event():
     try:
         download_model()
+        
+        # Disable mixed precision during model loading
+        original_policy = tf.keras.mixed_precision.global_policy()
+        tf.keras.mixed_precision.set_global_policy('float32')
+        
         app.state.model = load_model()
         app.state.cropper = FaceCropper()
         app.state.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        
+        # Restore original policy
+        tf.keras.mixed_precision.set_global_policy(original_policy)
+        
         logger.info(f"Service initialized with {MAX_WORKERS} workers")
     except Exception as e:
         logger.error(f"Error during startup: {e}")
@@ -347,7 +364,6 @@ async def predict(files: List[UploadFile] = File(..., description="Image files t
     if not files:
         raise HTTPException(status_code=400, detail="At least one image file is required")
     
-    # Process files in parallel
     loop = asyncio.get_event_loop()
     tasks = [
         loop.run_in_executor(app.state.executor, process_single_file, file)
@@ -411,6 +427,6 @@ if __name__ == "__main__":
         app, 
         host="0.0.0.0", 
         port=8000,
-        workers=1,  # We're using ThreadPoolExecutor for parallelism
+        workers=1,
         limit_concurrency=MAX_WORKERS * 2
     )
