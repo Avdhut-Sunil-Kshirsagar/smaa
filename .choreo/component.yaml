@@ -3,7 +3,7 @@ endpoints:
     - name: deepfake-detection-endpoint-036
       displayName: deepfake-detection-endpoint
       service:
-        basePath: /health
+        basePath: /
         port: 8000
       type: REST
       networkVisibilities:
