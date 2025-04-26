@@ -1,8 +1,10 @@
-import sys
 import os
 os.environ['DEEPFACE_HOME'] = '/tmp/.deepface'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-  
+os.environ['TF_NUM_INTEROP_THREADS'] = '8'  # Optimize for CPU
+os.environ['TF_NUM_INTRAOP_THREADS'] = '8'  # Optimize for CPU
+os.environ['OMP_NUM_THREADS'] = '8'  # Optimize for CPU
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import tensorflow as tf
@@ -17,11 +19,17 @@ import tempfile
 import requests
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
-from typing_extensions import Annotated
+from concurrent.futures import ThreadPoolExecutor
+import logging
 
-# Set mixed precision policy
-policy = tf.keras.mixed_precision.Policy('mixed_float16')
-tf.keras.mixed_precision.set_global_policy(policy)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Configure TensorFlow for optimal CPU performance
+tf.config.threading.set_inter_op_parallelism_threads(8)
+tf.config.threading.set_intra_op_parallelism_threads(8)
+tf.config.set_soft_device_placement(True)
 
 app = FastAPI(
     title="Deepfake Detection API",
@@ -43,8 +51,9 @@ MODEL_DIR = os.path.join(os.getenv('MODEL_DIR', '/app/model'))
 MODEL_PATH = os.path.join(MODEL_DIR, "final_model_11_4_2025.keras")
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
+MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)  # Optimal worker count
 
-# Pydantic Models
+# Pydantic Models (unchanged from original)
 class PredictionResult(BaseModel):
     filename: str
     class_: str = Field(..., alias="class", description="Classification result", example="REAL")
@@ -65,7 +74,7 @@ class HealthCheckResponse(BaseModel):
     model_path: Optional[str] = Field(None, description="Path to model file")
     model_exists: Optional[bool] = Field(None, description="Whether model file exists")
 
-# Custom layers
+# Custom layers (unchanged from original)
 class EfficientChannelAttention(layers.Layer):
     def __init__(self, channels, reduction=8, **kwargs):
         super().__init__(**kwargs)
@@ -153,7 +162,7 @@ class FixedHybridBlock(layers.Layer):
 
 def download_model():
     if not os.path.exists(MODEL_PATH):
-        print("Downloading model...")
+        logger.info("Downloading model...")
         try:
             os.makedirs(MODEL_DIR, exist_ok=True)
             response = requests.get(MODEL_URL, stream=True)
@@ -162,12 +171,12 @@ def download_model():
             with open(MODEL_PATH, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
-            print(f"Model downloaded successfully to {MODEL_PATH}")
+            logger.info(f"Model downloaded successfully to {MODEL_PATH}")
         except Exception as e:
-            print(f"Error downloading model: {e}")
+            logger.error(f"Error downloading model: {e}")
             raise
     else:
-        print("Model already exists, skipping download.")
+        logger.info("Model already exists, skipping download.")
 
 def load_model():
     if not os.path.exists(MODEL_PATH):
@@ -178,57 +187,143 @@ def load_model():
         'FixedSpatialAttention': FixedSpatialAttention,
         'FixedHybridBlock': FixedHybridBlock
     }
-    return tf.keras.models.load_model(MODEL_PATH, custom_objects=custom_objects)
+    
+    # Load with optimized settings for CPU
+    model = tf.keras.models.load_model(
+        MODEL_PATH, 
+        custom_objects=custom_objects,
+        compile=False
+    )
+    
+    # Warm up the model
+    dummy_input = [
+        np.random.rand(1, *TARGET_SIZE, 3).astype(np.float32),
+        np.random.rand(1, *TARGET_SIZE, 3).astype(np.float32)
+    ]
+    model.predict(dummy_input, batch_size=1)
+    
+    return model
 
 class FaceCropper:
     def __init__(self):
         try:
-            print("DeepFace detector initialized successfully.")
+            logger.info("DeepFace detector initialized successfully.")
         except Exception as e:
-            print(f"Error initializing DeepFace: {e}")
+            logger.error(f"Error initializing DeepFace: {e}")
 
     def safe_crop(self, image_path, target_size=(224, 224)):
         try:
-            faces = DeepFace.extract_faces(image_path, detector_backend='opencv', enforce_detection=False)
+            # Use OpenCV directly for faster image loading
+            img = cv2.imread(image_path)
+            if img is None:
+                raise ValueError("Failed to read image file")
             
-            if len(faces) == 0:
-                print("No face detected, using full image as cropped face.")
-                full_img = cv2.imread(image_path)
-                if full_img is None:
-                    raise ValueError("Failed to read image file")
-                cropped_face = cv2.resize(full_img, target_size)
-            else:
-                cropped_face = faces[0]['face']
-                cropped_face = cv2.resize(cropped_face, target_size)
+            # Convert to RGB (what DeepFace expects)
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             
-            if cropped_face.shape != (target_size[0], target_size[1], 3):
-                print("Warning: Cropped face shape is not as expected.")
-                cropped_face = np.zeros((target_size[0], target_size[1], 3), dtype=np.float32)
+            # Try face detection
+            try:
+                faces = DeepFace.extract_faces(
+                    img_path=img_rgb,
+                    detector_backend='opencv',
+                    enforce_detection=False
+                )
+                
+                if len(faces) == 0:
+                    logger.debug("No face detected, using full image")
+                    cropped_face = cv2.resize(img, target_size)
+                else:
+                    cropped_face = faces[0]['face']
+                    cropped_face = cv2.resize(cropped_face, target_size)
+            except Exception as e:
+                logger.warning(f"Face detection failed, using full image: {e}")
+                cropped_face = cv2.resize(img, target_size)
             
             return cropped_face
         except Exception as e:
-            print(f"Error during cropping: {e}")
+            logger.error(f"Error during cropping: {e}")
             return np.zeros((*target_size, 3), dtype=np.float32)
 
 def is_valid_image(file_bytes):
     try:
         image_type = imghdr.what(None, h=file_bytes)
         return image_type in ['jpeg', 'jpg', 'png', 'bmp']
-    except:  
+    except Exception:
         return False
 
 def preprocess_image(file_path, target_size=(224, 224)):
     try:
-        img = tf.io.read_file(file_path)
-        try:
-            img = tf.image.decode_jpeg(img, channels=3)
-        except:
-            img = tf.image.decode_image(img, channels=3, expand_animations=False)
-        img = tf.image.convert_image_dtype(img, tf.float32)
-        return tf.image.resize(img, target_size).numpy()
+        # Use OpenCV for faster image loading
+        img = cv2.imread(file_path)
+        if img is None:
+            raise ValueError("Failed to read image file")
+        
+        # Convert to float32 and normalize
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = img.astype(np.float32) / 255.0
+        
+        # Resize using OpenCV (faster than tf.image.resize)
+        return cv2.resize(img, target_size)
     except Exception as e:
-        print(f"Error preprocessing image: {e}")
+        logger.error(f"Error preprocessing image: {e}")
         return np.zeros((*target_size, 3), dtype=np.float32)
+
+def process_single_file(file: UploadFile):
+    result = {
+        "filename": file.filename,
+        "class": None,
+        "confidence": None,
+        "probabilities": None,
+        "error": None
+    }
+    
+    try:
+        # Validate image
+        file_bytes = file.file.read()
+        if not is_valid_image(file_bytes):
+            result["error"] = f"Invalid image format for {file.filename}. Supported: JPEG, PNG, BMP"
+            return result
+        
+        # Save to temp file
+        with tempfile.NamedTemporaryFile(
+            delete=False, 
+            suffix=os.path.splitext(file.filename)[1]
+        ) as temp_file:
+            temp_file.write(file_bytes)
+            temp_path = temp_file.name
+        
+        try:
+            # Preprocess images
+            full_img = preprocess_image(temp_path, TARGET_SIZE)
+            face_img = app.state.cropper.safe_crop(temp_path, TARGET_SIZE)
+            
+            # Make prediction
+            prediction = app.state.model.predict([
+                np.array([full_img]), 
+                np.array([face_img])
+            ], batch_size=1)[0]
+            
+            # Convert to Python native types
+            result.update({
+                "class": CLASS_NAMES[np.argmax(prediction)],
+                "confidence": float(np.max(prediction)),
+                "probabilities": {
+                    name: float(prob) 
+                    for name, prob in zip(CLASS_NAMES, prediction)
+                }
+            })
+            
+        except Exception as e:
+            result["error"] = f"Processing error: {str(e)}"
+            
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+                
+    except Exception as e:
+        result["error"] = f"Unexpected error: {str(e)}"
+        
+    return result
 
 @app.on_event("startup")
 async def startup_event():
@@ -236,9 +331,10 @@ async def startup_event():
         download_model()
         app.state.model = load_model()
         app.state.cropper = FaceCropper()
-        print("Model and face cropper initialized successfully.")
+        app.state.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        logger.info(f"Service initialized with {MAX_WORKERS} workers")
     except Exception as e:
-        print(f"Error during startup: {e}")
+        logger.error(f"Error during startup: {e}")
         raise RuntimeError(f"Failed to initialize service: {e}")
 
 @app.post("/predict", 
@@ -251,68 +347,14 @@ async def predict(files: List[UploadFile] = File(..., description="Image files t
     if not files:
         raise HTTPException(status_code=400, detail="At least one image file is required")
     
-    results = []
-    for file in files:
-        result = {
-            "filename": file.filename,
-            "class": None,
-            "confidence": None,
-            "probabilities": None,
-            "error": None
-        }
-        
-        try:
-            # Validate image
-            file_bytes = await file.read()
-            if not is_valid_image(file_bytes):
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Invalid image format for {file.filename}. Supported: JPEG, PNG, BMP"
-                )
-            
-            # Save to temp file
-            with tempfile.NamedTemporaryFile(
-                delete=False, 
-                suffix=os.path.splitext(file.filename)[1]
-            ) as temp_file:
-                temp_file.write(file_bytes)
-                temp_path = temp_file.name
-            
-            try:
-                # Preprocess images
-                full_img = preprocess_image(temp_path, TARGET_SIZE)
-                face_img = app.state.cropper.safe_crop(temp_path, TARGET_SIZE)
-                
-                # Make prediction
-                prediction = app.state.model.predict([
-                    np.array([full_img]), 
-                    np.array([face_img])
-                ])[0]
-                
-                # Convert to Python native types
-                result.update({
-                    "class": CLASS_NAMES[np.argmax(prediction)],
-                    "confidence": float(np.max(prediction)),
-                    "probabilities": {
-                        name: float(prob) 
-                        for name, prob in zip(CLASS_NAMES, prediction)
-                    }
-                })
-                
-            except Exception as e:
-                result["error"] = f"Processing error: {str(e)}"
-                
-            finally:
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-                    
-        except HTTPException as e:
-            result["error"] = str(e.detail)
-        except Exception as e:
-            result["error"] = f"Unexpected error: {str(e)}"
-            
-        results.append(result)
+    # Process files in parallel
+    loop = asyncio.get_event_loop()
+    tasks = [
+        loop.run_in_executor(app.state.executor, process_single_file, file)
+        for file in files
+    ]
     
+    results = await asyncio.gather(*tasks)
     return results
 
 @app.get("/health", 
@@ -347,7 +389,6 @@ def custom_openapi():
         license_info=app.license_info
     )
     
-    # Add servers
     openapi_schema["servers"] = [
         {
             "url": "http://localhost:8000",
@@ -366,4 +407,10 @@ app.openapi = custom_openapi
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        workers=1,  # We're using ThreadPoolExecutor for parallelism
+        limit_concurrency=MAX_WORKERS * 2
+    )
