@@ -460,5 +460,4 @@ if __name__ == "__main__":
         port=8000,
         workers=1,  # Single worker for limited CPU
         limit_concurrency=4,  # Limit total concurrent requests
-        timeout_keep_alive=30  # Reduce keep-alive timeout
     )
