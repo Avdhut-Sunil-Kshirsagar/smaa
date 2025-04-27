@@ -1,9 +1,9 @@
+import sys
 import os
+import asyncio
 os.environ['DEEPFACE_HOME'] = '/tmp/.deepface'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-os.environ['TF_NUM_INTEROP_THREADS'] = '8'
-os.environ['TF_NUM_INTRAOP_THREADS'] = '8'
-os.environ['OMP_NUM_THREADS'] = '8'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Reduce TensorFlow logging
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -19,22 +19,21 @@ import tempfile
 import requests
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
-from concurrent.futures import ThreadPoolExecutor
 import logging
-import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configure TensorFlow for optimal CPU performance
-tf.config.threading.set_inter_op_parallelism_threads(8)
-tf.config.threading.set_intra_op_parallelism_threads(8)
-tf.config.set_soft_device_placement(True)
+
+# Set mixed precision policy
+policy = tf.keras.mixed_precision.Policy('mixed_float16')
+tf.keras.mixed_precision.set_global_policy(policy)
 
 app = FastAPI(
     title="Deepfake Detection API",
-    description="API for detecting deepfake, real and AI-generated images",
+    description="API for detecting deepfake, real and AI-generated images (CPU Optimized)",
     version="1.0",
     contact={
         "name": "API Support",
@@ -48,11 +47,12 @@ app = FastAPI(
 
 # Constants
 MODEL_URL = "https://www.googleapis.com/drive/v3/files/1sUNdQHfqKBCW44wGEi158W2DK71g0BZE?alt=media&key=AIzaSyAQWd9J7XainNo1hx3cUzJsklrK-wm9Sng"
-MODEL_DIR = os.path.join(os.getenv('MODEL_DIR', '/app/model'))
+MODEL_DIR = os.path.join(os.getenv('MODEL_DIR', '/tmp/model'))
 MODEL_PATH = os.path.join(MODEL_DIR, "final_model_11_4_2025.keras")
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
-MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_WORKERS = 2  # Limit concurrent processing for CPU constraints
 
 # Pydantic Models
 class PredictionResult(BaseModel):
@@ -75,12 +75,13 @@ class HealthCheckResponse(BaseModel):
     model_path: Optional[str] = Field(None, description="Path to model file")
     model_exists: Optional[bool] = Field(None, description="Whether model file exists")
 
-# Custom layers with proper serialization
+# Custom layers (simplified for CPU)
 class EfficientChannelAttention(layers.Layer):
     def __init__(self, channels, reduction=8, **kwargs):
         super().__init__(**kwargs)
         self.channels = channels
         self.reduction = reduction
+        
         self.avg_pool = layers.GlobalAveragePooling2D()
         self.max_pool = layers.GlobalMaxPooling2D()
         self.fc = models.Sequential([
@@ -102,9 +103,6 @@ class EfficientChannelAttention(layers.Layer):
         })
         return config
 
-    def compute_output_shape(self, input_shape):
-        return input_shape
-
 class FixedSpatialAttention(layers.Layer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -120,13 +118,11 @@ class FixedSpatialAttention(layers.Layer):
     def get_config(self):
         return super().get_config()
 
-    def compute_output_shape(self, input_shape):
-        return input_shape
-
 class FixedHybridBlock(layers.Layer):
     def __init__(self, filters, **kwargs):
         super().__init__(**kwargs)
         self.filters = filters
+        
         self.conv1 = layers.Conv2D(filters, 3, padding='same')
         self.conv2 = layers.Conv2D(filters, 3, padding='same')
         self.eca = EfficientChannelAttention(filters)
@@ -139,10 +135,10 @@ class FixedHybridBlock(layers.Layer):
     def build(self, input_shape):
         if input_shape[-1] != self.filters:
             self.res_conv = layers.Conv2D(self.filters, 1)
-        super().build(input_shape)
 
     def call(self, inputs):
         residual = inputs
+        
         if self.res_conv is not None:
             residual = self.res_conv(inputs)
             
@@ -165,30 +161,44 @@ class FixedHybridBlock(layers.Layer):
         })
         return config
 
-    def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[1], input_shape[2], self.filters)
-
 def download_model():
     if not os.path.exists(MODEL_PATH):
         logger.info("Downloading model...")
         try:
             os.makedirs(MODEL_DIR, exist_ok=True)
-            response = requests.get(MODEL_URL, stream=True)
-            response.raise_for_status()
             
-            with open(MODEL_PATH, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+            # Stream download to avoid memory issues
+            with requests.get(MODEL_URL, stream=True) as response:
+                response.raise_for_status()
+                
+                temp_path = MODEL_PATH + '.tmp'
+                with open(temp_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:  # filter out keep-alive chunks
+                            f.write(chunk)
+                
+                # Atomic rename to avoid partial downloads
+                os.rename(temp_path, MODEL_PATH)
+                
             logger.info(f"Model downloaded successfully to {MODEL_PATH}")
         except Exception as e:
             logger.error(f"Error downloading model: {e}")
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
             raise
     else:
         logger.info("Model already exists, skipping download.")
 
+
+
+# Update the load_model function to handle warmup properly
 def load_model():
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
+    
+    # Configure TensorFlow for CPU optimization
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
     
     custom_objects = {
         'EfficientChannelAttention': EfficientChannelAttention,
@@ -197,24 +207,22 @@ def load_model():
     }
     
     try:
-        model = tf.keras.models.load_model(
-            MODEL_PATH, 
-            custom_objects=custom_objects,
-            compile=False
-        )
+        model = tf.keras.models.load_model(MODEL_PATH, custom_objects=custom_objects)
         
-        # Build the model by running inference on dummy data
+        # Warm up the model with TensorFlow operations
         dummy_input = [
-            np.random.rand(1, *TARGET_SIZE, 3).astype(np.float32),
-            np.random.rand(1, *TARGET_SIZE, 3).astype(np.float32)
+            tf.convert_to_tensor(np.zeros((1, *TARGET_SIZE, 3))),
+            tf.convert_to_tensor(np.zeros((1, *TARGET_SIZE, 3)))
         ]
-        model.predict(dummy_input, batch_size=1)
+        model.predict(dummy_input, steps=1)
         
         return model
     except Exception as e:
         logger.error(f"Error loading model: {e}")
         raise
-
+    
+    
+    
 class FaceCropper:
     def __init__(self):
         try:
@@ -224,28 +232,35 @@ class FaceCropper:
 
     def safe_crop(self, image_path, target_size=(224, 224)):
         try:
+            # Use OpenCV for initial image loading
             img = cv2.imread(image_path)
             if img is None:
                 raise ValueError("Failed to read image file")
             
+            # Convert to RGB for DeepFace
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             
-            try:
-                faces = DeepFace.extract_faces(
-                    img_path=img_rgb,
-                    detector_backend='opencv',
-                    enforce_detection=False
-                )
+            # Use temp file for DeepFace if needed
+            with tempfile.NamedTemporaryFile(suffix='.jpg') as temp_file:
+                temp_path = temp_file.name
+                cv2.imwrite(temp_path, img_rgb)
                 
-                if len(faces) == 0:
-                    logger.debug("No face detected, using full image")
-                    cropped_face = cv2.resize(img, target_size)
-                else:
-                    cropped_face = faces[0]['face']
-                    cropped_face = cv2.resize(cropped_face, target_size)
-            except Exception as e:
-                logger.warning(f"Face detection failed, using full image: {e}")
+                faces = DeepFace.extract_faces(
+                    temp_path, 
+                    detector_backend='opencv', 
+                    enforce_detection=False,
+                    align=False  # Skip alignment to save CPU
+                )
+            
+            if len(faces) == 0:
+                logger.info("No face detected, using full image as cropped face.")
                 cropped_face = cv2.resize(img, target_size)
+            else:
+                face = faces[0]['face']
+                if isinstance(face, np.ndarray):
+                    cropped_face = cv2.resize(face, target_size)
+                else:
+                    raise ValueError("Invalid face data returned")
             
             return cropped_face
         except Exception as e:
@@ -254,6 +269,11 @@ class FaceCropper:
 
 def is_valid_image(file_bytes):
     try:
+        # Check file size first
+        if len(file_bytes) > MAX_FILE_SIZE:
+            return False
+            
+        # Check image type
         image_type = imghdr.what(None, h=file_bytes)
         return image_type in ['jpeg', 'jpg', 'png', 'bmp']
     except Exception:
@@ -261,19 +281,19 @@ def is_valid_image(file_bytes):
 
 def preprocess_image(file_path, target_size=(224, 224)):
     try:
+        # Use OpenCV for faster image processing
         img = cv2.imread(file_path)
         if img is None:
             raise ValueError("Failed to read image file")
         
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
-        
         return cv2.resize(img, target_size)
     except Exception as e:
         logger.error(f"Error preprocessing image: {e}")
         return np.zeros((*target_size, 3), dtype=np.float32)
 
-def process_single_file(file: UploadFile):
+def process_single_file(file):
     result = {
         "filename": file.filename,
         "class": None,
@@ -283,11 +303,15 @@ def process_single_file(file: UploadFile):
     }
     
     try:
-        file_bytes = file.file.read()
+        # Validate image
+        file_bytes = file.file.read(MAX_FILE_SIZE + 1)
+        if len(file_bytes) > MAX_FILE_SIZE:
+            raise ValueError("File size exceeds maximum limit (10MB)")
+            
         if not is_valid_image(file_bytes):
-            result["error"] = f"Invalid image format for {file.filename}. Supported: JPEG, PNG, BMP"
-            return result
+            raise ValueError(f"Invalid image format. Supported: JPEG, PNG, BMP")
         
+        # Save to temp file
         with tempfile.NamedTemporaryFile(
             delete=False, 
             suffix=os.path.splitext(file.filename)[1]
@@ -296,14 +320,17 @@ def process_single_file(file: UploadFile):
             temp_path = temp_file.name
         
         try:
+            # Preprocess images
             full_img = preprocess_image(temp_path, TARGET_SIZE)
             face_img = app.state.cropper.safe_crop(temp_path, TARGET_SIZE)
             
+            # Make prediction
             prediction = app.state.model.predict([
                 np.array([full_img]), 
                 np.array([face_img])
-            ], batch_size=1)[0]
+            ], verbose=0)[0]
             
+            # Convert to Python native types
             result.update({
                 "class": CLASS_NAMES[np.argmax(prediction)],
                 "confidence": float(np.max(prediction)),
@@ -315,46 +342,65 @@ def process_single_file(file: UploadFile):
             
         except Exception as e:
             result["error"] = f"Processing error: {str(e)}"
+            logger.error(f"Error processing {file.filename}: {e}")
             
         finally:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
                 
     except Exception as e:
-        result["error"] = f"Unexpected error: {str(e)}"
+        result["error"] = str(e)
+        logger.error(f"Error with file {file.filename}: {e}")
         
     return result
 
 @app.on_event("startup")
 async def startup_event():
     try:
+        # Configure TensorFlow for optimal CPU performance
+        tf.config.set_soft_device_placement(True)
+        tf.config.optimizer.set_jit(False)  # Disable JIT for better stability
+        
         download_model()
         app.state.model = load_model()
         app.state.cropper = FaceCropper()
         app.state.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-        logger.info(f"Service initialized with {MAX_WORKERS} workers")
+        logger.info("Service initialized successfully.")
     except Exception as e:
         logger.error(f"Error during startup: {e}")
         raise RuntimeError(f"Failed to initialize service: {e}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if hasattr(app.state, 'executor'):
+        app.state.executor.shutdown(wait=False)
+    logger.info("Service shutdown complete.")
 
 @app.post("/predict", 
           response_model=List[PredictionResult],
           responses={
               400: {"description": "Invalid input (no files or invalid format)"},
-              500: {"description": "Internal server error"}
+              500: {"description": "Internal server error"},
+              413: {"description": "Payload too large"}
           })
-async def predict(files: List[UploadFile] = File(..., description="Image files to analyze")):
+async def predict(files: List[UploadFile] = File(..., description="Image files to analyze (max 10MB each)")):
     if not files:
         raise HTTPException(status_code=400, detail="At least one image file is required")
     
-    loop = asyncio.get_event_loop()
-    tasks = [
-        loop.run_in_executor(app.state.executor, process_single_file, file)
-        for file in files
-    ]
+    if len(files) > 10:
+        raise HTTPException(status_code=413, detail="Maximum 10 files allowed per request")
     
-    results = await asyncio.gather(*tasks)
-    return results
+    try:
+        # Process files in parallel but with limited workers
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(
+            app.state.executor,
+            lambda: list(map(process_single_file, files)))
+        
+        return results
+    except Exception as e:
+        logger.error(f"Error in predict endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/health", 
          response_model=HealthCheckResponse,
@@ -370,6 +416,7 @@ async def health_check():
             "model_exists": os.path.exists(MODEL_PATH)
         }
     except Exception as e:
+        logger.error(f"Health check failed: {e}")
         raise HTTPException(
             status_code=503,
             detail=f"Service unavailable: {str(e)}"
@@ -388,13 +435,14 @@ def custom_openapi():
         license_info=app.license_info
     )
     
+    # Add servers
     openapi_schema["servers"] = [
         {
             "url": "http://localhost:8000",
             "description": "Local development server"
         },
         {
-            "url": "https://dff47398-ad64-430a-956d-ee6c36ac85ea-dev.e1-us-east-azure.choreoapis.dev/default/smaa/v1.0",
+            "url": "https://your-production-url.com",
             "description": "Production server"
         }
     ]
@@ -410,6 +458,7 @@ if __name__ == "__main__":
         app, 
         host="0.0.0.0", 
         port=8000,
-        workers=1,
-        limit_concurrency=MAX_WORKERS * 2
+        workers=1,  # Single worker for limited CPU
+        limit_concurrency=4,  # Limit total concurrent requests
+        timeout_keep_alive=30  # Reduce keep-alive timeout
     )
