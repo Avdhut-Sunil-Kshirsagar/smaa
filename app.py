@@ -1,9 +1,10 @@
 import sys
 import os
 import asyncio
-os.environ['DEEPFACE_HOME'] = '/tmp/.deepface'
+os.environ['DEEPFACE_HOME'] = './tmp/.deepface'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Reduce TensorFlow logging
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '1'
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -47,7 +48,7 @@ app = FastAPI(
 
 # Constants
 MODEL_URL = "https://www.googleapis.com/drive/v3/files/1sUNdQHfqKBCW44wGEi158W2DK71g0BZE?alt=media&key=AIzaSyAQWd9J7XainNo1hx3cUzJsklrK-wm9Sng"
-MODEL_DIR = os.path.join(os.getenv('MODEL_DIR', '/tmp/model'))
+MODEL_DIR = os.path.join(os.getenv('MODEL_DIR', './tmp/model'))
 MODEL_PATH = os.path.join(MODEL_DIR, "final_model_11_4_2025.keras")
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
@@ -223,49 +224,36 @@ def load_model():
     
     
     
+# Modified FaceCropper class
 class FaceCropper:
     def __init__(self):
-        try:
-            logger.info("DeepFace detector initialized successfully.")
-        except Exception as e:
-            logger.error(f"Error initializing DeepFace: {e}")
+        logger.info("DeepFace detector initialized successfully.")
 
-    def safe_crop(self, image_path, target_size=(224, 224)):
+    def safe_crop(self, img_array: np.ndarray, target_size=(224, 224)) -> np.ndarray:
+        """Process image entirely in memory"""
         try:
-            # Use OpenCV for initial image loading
-            img = cv2.imread(image_path)
-            if img is None:
-                raise ValueError("Failed to read image file")
-            
             # Convert to RGB for DeepFace
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img_rgb = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
             
-            # Use temp file for DeepFace if needed
-            with tempfile.NamedTemporaryFile(suffix='.jpg') as temp_file:
-                temp_path = temp_file.name
-                cv2.imwrite(temp_path, img_rgb)
-                
-                faces = DeepFace.extract_faces(
-                    temp_path, 
-                    detector_backend='opencv', 
-                    enforce_detection=False,
-                    align=False  # Skip alignment to save CPU
-                )
+            # Direct face extraction from memory
+            faces = DeepFace.extract_faces(
+                img_path=img_rgb,
+                detector_backend='opencv',
+                enforce_detection=False,
+                align=False
+            )
             
             if len(faces) == 0:
-                logger.info("No face detected, using full image as cropped face.")
-                cropped_face = cv2.resize(img, target_size)
-            else:
-                face = faces[0]['face']
-                if isinstance(face, np.ndarray):
-                    cropped_face = cv2.resize(face, target_size)
-                else:
-                    raise ValueError("Invalid face data returned")
+                logger.debug("No face detected, using full image")
+                return cv2.resize(img_array, target_size)
             
-            return cropped_face
+            face_img = faces[0]['face']
+            return cv2.resize(face_img, target_size)
+            
         except Exception as e:
-            logger.error(f"Error during cropping: {e}")
-            return np.zeros((*target_size, 3), dtype=np.float32)
+            logger.error(f"Face processing error: {str(e)}")
+            return cv2.resize(img_array, target_size)
+
 
 def is_valid_image(file_bytes):
     try:
@@ -279,21 +267,20 @@ def is_valid_image(file_bytes):
     except Exception:
         return False
 
-def preprocess_image(file_path, target_size=(224, 224)):
+# Modified preprocessing function
+def preprocess_image(img_array: np.ndarray, target_size=(224, 224)) -> np.ndarray:
+    """Process image from memory buffer"""
     try:
-        # Use OpenCV for faster image processing
-        img = cv2.imread(file_path)
-        if img is None:
-            raise ValueError("Failed to read image file")
-        
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
         return cv2.resize(img, target_size)
     except Exception as e:
-        logger.error(f"Error preprocessing image: {e}")
+        logger.error(f"Preprocessing error: {str(e)}")
         return np.zeros((*target_size, 3), dtype=np.float32)
 
-def process_single_file(file):
+# Updated file processing
+def process_single_file(file: UploadFile):
+    """Process file entirely in memory"""
     result = {
         "filename": file.filename,
         "class": None,
@@ -303,72 +290,71 @@ def process_single_file(file):
     }
     
     try:
-        # Validate image
+        # Read and validate directly from memory
         file_bytes = file.file.read(MAX_FILE_SIZE + 1)
         if len(file_bytes) > MAX_FILE_SIZE:
-            raise ValueError("File size exceeds maximum limit (10MB)")
+            raise ValueError("File size exceeds 10MB limit")
             
         if not is_valid_image(file_bytes):
-            raise ValueError(f"Invalid image format. Supported: JPEG, PNG, BMP")
+            raise ValueError("Invalid image format")
         
-        # Save to temp file
-        with tempfile.NamedTemporaryFile(
-            delete=False, 
-            suffix=os.path.splitext(file.filename)[1]
-        ) as temp_file:
-            temp_file.write(file_bytes)
-            temp_path = temp_file.name
+        # Convert bytes to numpy array
+        nparr = np.frombuffer(file_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("Invalid image data")
         
-        try:
-            # Preprocess images
-            full_img = preprocess_image(temp_path, TARGET_SIZE)
-            face_img = app.state.cropper.safe_crop(temp_path, TARGET_SIZE)
-            
-            # Make prediction
-            prediction = app.state.model.predict([
-                np.array([full_img]), 
-                np.array([face_img])
-            ], verbose=0)[0]
-            
-            # Convert to Python native types
-            result.update({
-                "class": CLASS_NAMES[np.argmax(prediction)],
-                "confidence": float(np.max(prediction)),
-                "probabilities": {
-                    name: float(prob) 
-                    for name, prob in zip(CLASS_NAMES, prediction)
-                }
-            })
-            
-        except Exception as e:
-            result["error"] = f"Processing error: {str(e)}"
-            logger.error(f"Error processing {file.filename}: {e}")
-            
-        finally:
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-                
+        # Process in memory
+        full_img = preprocess_image(img)
+        face_img = app.state.cropper.safe_crop(img)
+        
+        # Make prediction
+        prediction = app.state.model.predict([
+            np.array([full_img]), 
+            np.array([face_img])
+        ], verbose=0)[0]
+        
+        # Build result
+        result.update({
+            "class": CLASS_NAMES[np.argmax(prediction)],
+            "confidence": float(np.max(prediction)),
+            "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)}
+        })
+        
     except Exception as e:
         result["error"] = str(e)
-        logger.error(f"Error with file {file.filename}: {e}")
+        logger.error(f"Error processing {file.filename}: {str(e)}")
         
     return result
+
 
 @app.on_event("startup")
 async def startup_event():
     try:
-        # Configure TensorFlow for optimal CPU performance
-        tf.config.set_soft_device_placement(True)
-        tf.config.optimizer.set_jit(False)  # Disable JIT for better stability
+        # CPU-specific optimizations
+        tf.config.optimizer.set_experimental_options({
+            'layout_optimizer': False,  # Disable for CPU
+            'constant_folding': True,
+            'shape_optimization': True,
+            'remapping': False,  # Disable for CPU
+            'arithmetic_optimization': True,
+        })
+        
+        # Remove GPU-specific memory growth setting
+        # Only configure thread pools for CPU
+        tf.config.threading.set_intra_op_parallelism_threads(2)
+        tf.config.threading.set_inter_op_parallelism_threads(2)
         
         download_model()
         app.state.model = load_model()
         app.state.cropper = FaceCropper()
         app.state.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-        logger.info("Service initialized successfully.")
+        logger.info("Service initialized with CPU optimizations.")
     except Exception as e:
-        logger.error(f"Error during startup: {e}")
-        raise RuntimeError(f"Failed to initialize service: {e}")
+        logger.error(f"Startup failed: {str(e)}")
+        raise RuntimeError(f"Initialization error: {str(e)}")
+    
+    
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -376,31 +362,25 @@ async def shutdown_event():
         app.state.executor.shutdown(wait=False)
     logger.info("Service shutdown complete.")
 
-@app.post("/predict", 
-          response_model=List[PredictionResult],
-          responses={
-              400: {"description": "Invalid input (no files or invalid format)"},
-              500: {"description": "Internal server error"},
-              413: {"description": "Payload too large"}
-          })
-async def predict(files: List[UploadFile] = File(..., description="Image files to analyze (max 10MB each)")):
-    if not files:
-        raise HTTPException(status_code=400, detail="At least one image file is required")
-    
+@app.post("/predict", response_model=List[PredictionResult])
+async def predict(files: List[UploadFile] = File(...)):
     if len(files) > 10:
-        raise HTTPException(status_code=413, detail="Maximum 10 files allowed per request")
+        raise HTTPException(413, "Maximum 10 files allowed")
+    
+    async def process_wrapper(file: UploadFile):
+        return await asyncio.get_event_loop().run_in_executor(
+            app.state.executor,
+            process_single_file,
+            file
+        )
     
     try:
-        # Process files in parallel but with limited workers
-        loop = asyncio.get_event_loop()
-        results = await loop.run_in_executor(
-            app.state.executor,
-            lambda: list(map(process_single_file, files)))
-        
-        return results
+        return await asyncio.gather(*(process_wrapper(f) for f in files))
     except Exception as e:
-        logger.error(f"Error in predict endpoint: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"Prediction error: {str(e)}")
+        raise HTTPException(500, "Processing failed")
+    
+    
 
 @app.get("/health", 
          response_model=HealthCheckResponse,
