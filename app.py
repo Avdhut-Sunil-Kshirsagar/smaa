@@ -50,8 +50,7 @@ MODEL_PATH = os.path.join(MODEL_DIR, "final_model_11_4_2025.keras")
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
-MAX_WORKERS = 1  # strictly 0.5 vCPU
-TIMEOUT_SECONDS = 30
+MAX_WORKERS = 4  # strictly 0.5 vCPU
 
 # Models
 class PredictionResult(BaseModel):
@@ -262,4 +261,4 @@ app.openapi = custom_openapi
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, workers=1, limit_concurrency=4, timeout_keep_alive=TIMEOUT_SECONDS)
+    uvicorn.run(app, host="0.0.0.0", port=8000, workers=1, limit_concurrency=8)
