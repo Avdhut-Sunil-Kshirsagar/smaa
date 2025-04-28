@@ -6,7 +6,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Reduce TensorFlow logging
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '1'
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import JSONResponse
 import tensorflow as tf
 from tensorflow import keras
@@ -22,11 +22,11 @@ from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
 import logging
 from concurrent.futures import ThreadPoolExecutor
+import aiofiles
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
-
 
 # Set mixed precision policy
 policy = tf.keras.mixed_precision.Policy('mixed_float16')
@@ -34,8 +34,8 @@ tf.keras.mixed_precision.set_global_policy(policy)
 
 app = FastAPI(
     title="Deepfake Detection API",
-    description="API for detecting deepfake, real and AI-generated images (CPU Optimized)",
-    version="1.0",
+    description="Optimized API for detecting deepfake images (CPU Optimized)",
+    version="2.0",
     contact={
         "name": "API Support",
         "email": "support@example.com"
@@ -43,7 +43,11 @@ app = FastAPI(
     license_info={
         "name": "Apache 2.0",
         "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
-    }
+    },
+    docs_url="/docs",
+    redoc_url=None,
+    openapi_url="/openapi.json",
+    default_response_class=JSONResponse
 )
 
 # Constants
@@ -53,7 +57,8 @@ MODEL_PATH = os.path.join(MODEL_DIR, "final_model_11_4_2025.keras")
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-MAX_WORKERS = 2  # Limit concurrent processing for CPU constraints
+MAX_WORKERS = 2  # Limit concurrent processing
+MAX_CONCURRENT_REQUESTS = 100
 
 # Pydantic Models
 class PredictionResult(BaseModel):
@@ -76,7 +81,7 @@ class HealthCheckResponse(BaseModel):
     model_path: Optional[str] = Field(None, description="Path to model file")
     model_exists: Optional[bool] = Field(None, description="Whether model file exists")
 
-# Custom layers (simplified for CPU)
+# Custom layers (optimized for CPU)
 class EfficientChannelAttention(layers.Layer):
     def __init__(self, channels, reduction=8, **kwargs):
         super().__init__(**kwargs)
@@ -175,10 +180,9 @@ def download_model():
                 temp_path = MODEL_PATH + '.tmp'
                 with open(temp_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:  # filter out keep-alive chunks
+                        if chunk:
                             f.write(chunk)
                 
-                # Atomic rename to avoid partial downloads
                 os.rename(temp_path, MODEL_PATH)
                 
             logger.info(f"Model downloaded successfully to {MODEL_PATH}")
@@ -190,9 +194,6 @@ def download_model():
     else:
         logger.info("Model already exists, skipping download.")
 
-
-
-# Update the load_model function to handle warmup properly
 def load_model():
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
@@ -210,7 +211,7 @@ def load_model():
     try:
         model = tf.keras.models.load_model(MODEL_PATH, custom_objects=custom_objects)
         
-        # Warm up the model with TensorFlow operations
+        # Warm up the model
         dummy_input = [
             tf.convert_to_tensor(np.zeros((1, *TARGET_SIZE, 3))),
             tf.convert_to_tensor(np.zeros((1, *TARGET_SIZE, 3)))
@@ -221,87 +222,82 @@ def load_model():
     except Exception as e:
         logger.error(f"Error loading model: {e}")
         raise
-    
-    
-    
-# Modified FaceCropper class
+
 class FaceCropper:
     def __init__(self):
-        logger.info("DeepFace detector initialized successfully.")
+        self.backend = 'opencv'  # Fastest CPU backend
+        logger.info("FaceCropper initialized with OpenCV backend")
 
     def safe_crop(self, img_array: np.ndarray, target_size=(224, 224)) -> np.ndarray:
-        """Process image entirely in memory"""
+        """Optimized face cropping with early returns"""
         try:
-            # Convert to RGB for DeepFace
-            img_rgb = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
-            
-            # Direct face extraction from memory
+            if min(img_array.shape[:2]) < 50:
+                return cv2.resize(img_array, target_size)
+                
             faces = DeepFace.extract_faces(
-                img_path=img_rgb,
-                detector_backend='opencv',
+                img_path=img_array,
+                detector_backend=self.backend,
                 enforce_detection=False,
                 align=False
             )
             
-            if len(faces) == 0:
-                logger.debug("No face detected, using full image")
+            if not faces:
                 return cv2.resize(img_array, target_size)
-            
+                
             face_img = faces[0]['face']
             return cv2.resize(face_img, target_size)
-            
         except Exception as e:
             logger.error(f"Face processing error: {str(e)}")
             return cv2.resize(img_array, target_size)
 
+class ResourceCleaner:
+    @staticmethod
+    async def cleanup():
+        """Aggressive resource cleanup"""
+        try:
+            tf.keras.backend.clear_session()
+            
+            import gc
+            for _ in range(3):
+                gc.collect()
+            
+            cv2.destroyAllWindows()
+            
+            if tf.config.list_physical_devices('GPU'):
+                tf.config.experimental.reset_memory_stats('GPU:0')
+            
+            logger.debug("Aggressive resource cleanup completed")
+        except Exception as e:
+            logger.error(f"Cleanup error: {str(e)}")
+
+def preprocess_image(img_array: np.ndarray, target_size=(224, 224)) -> np.ndarray:
+    """Optimized preprocessing with proper type handling"""
+    try:
+        # Convert to RGB and float32 first
+        img = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB).astype(np.float32)
+        
+        # Then divide by 255 (now safe since we're already float32)
+        img /= 255.0
+        
+        # Resize last to minimize operations on larger array
+        return cv2.resize(img, target_size)
+    except Exception as e:
+        logger.error(f"Preprocessing error: {str(e)}")
+        return np.zeros((*target_size, 3), dtype=np.float32)
+    
 
 def is_valid_image(file_bytes):
     try:
-        # Check file size first
         if len(file_bytes) > MAX_FILE_SIZE:
             return False
             
-        # Check image type
         image_type = imghdr.what(None, h=file_bytes)
         return image_type in ['jpeg', 'jpg', 'png', 'bmp']
     except Exception:
         return False
 
-# Modified preprocessing function
-def preprocess_image(img_array: np.ndarray, target_size=(224, 224)) -> np.ndarray:
-    """Process image from memory buffer"""
-    try:
-        img = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
-        img = img.astype(np.float32) / 255.0
-        return cv2.resize(img, target_size)
-    except Exception as e:
-        logger.error(f"Preprocessing error: {str(e)}")
-        return np.zeros((*target_size, 3), dtype=np.float32)
-
-# Updated file processing
-# Add this new class for resource management
-class ResourceCleaner:
-    @staticmethod
-    async def cleanup():
-        """Clean up temporary resources after request processing"""
-        try:
-            # Clean up TensorFlow/Keras session
-            tf.keras.backend.clear_session()
-            
-            # Explicitly clean up OpenCV resources
-            cv2.destroyAllWindows()
-            
-            # Force garbage collection
-            import gc
-            gc.collect()
-            
-            logger.debug("Resources cleaned successfully")
-        except Exception as e:
-            logger.error(f"Cleanup error: {str(e)}")
-
-# Modified process_single_file function with cleanup
 async def process_single_file(file: UploadFile):
-    """Process file entirely in memory with automatic cleanup"""
+    """Highly optimized file processing"""
     result = {
         "filename": file.filename,
         "class": None,
@@ -311,52 +307,49 @@ async def process_single_file(file: UploadFile):
     }
     
     try:
-        # Read and validate directly from memory
+        # Read file in one go with size check
         file_bytes = await file.read()
-        await file.close()  # Explicitly close the file
-        
         if len(file_bytes) > MAX_FILE_SIZE:
-            raise ValueError("File size exceeds 10MB limit")
+            raise ValueError("File size exceeds limit")
             
-        if not is_valid_image(file_bytes):
-            raise ValueError("Invalid image format")
-        
-        # Convert bytes to numpy array
+        # Validate and decode in one step
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
             raise ValueError("Invalid image data")
         
-        # Process in memory
-        full_img = preprocess_image(img)
-        face_img = app.state.cropper.safe_crop(img)
+        # Process images in parallel
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            full_future = executor.submit(preprocess_image, img)
+            face_future = executor.submit(app.state.cropper.safe_crop, img)
+            full_img, face_img = await asyncio.gather(
+                asyncio.wrap_future(full_future),
+                asyncio.wrap_future(face_future))
         
-        # Make prediction
-        prediction = app.state.model.predict([
-            np.array([full_img]), 
-            np.array([face_img])
-        ], verbose=0)[0]
+        # Batch prediction
+        prediction = app.state.model.predict(
+            [np.array([full_img]), np.array([face_img])],
+            batch_size=1,
+            verbose=0
+        )[0]
         
-        # Build result
+        # Build result with minimal operations
+        class_idx = np.argmax(prediction)
         result.update({
-            "class": CLASS_NAMES[np.argmax(prediction)],
-            "confidence": float(np.max(prediction)),
-            "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)}
+            "class": CLASS_NAMES[class_idx],
+            "confidence": float(prediction[class_idx]),
+            "probabilities": dict(zip(CLASS_NAMES, prediction.astype(float)))
         })
         
     except Exception as e:
         result["error"] = str(e)
         logger.error(f"Error processing {file.filename}: {str(e)}")
     finally:
-        # Ensure cleanup happens even if error occurs
+        # Cleanup
+        for var in ['file_bytes', 'nparr', 'img', 'full_img', 'face_img']:
+            if var in locals():
+                del locals()[var]
         await ResourceCleaner.cleanup()
-        # Explicitly delete large objects
-        if 'img' in locals():
-            del img
-        if 'full_img' in locals():
-            del full_img
-        if 'face_img' in locals():
-            del face_img
         
     return result
 
@@ -365,15 +358,13 @@ async def startup_event():
     try:
         # CPU-specific optimizations
         tf.config.optimizer.set_experimental_options({
-            'layout_optimizer': False,  # Disable for CPU
+            'layout_optimizer': False,
             'constant_folding': True,
             'shape_optimization': True,
-            'remapping': False,  # Disable for CPU
+            'remapping': False,
             'arithmetic_optimization': True,
         })
         
-        # Remove GPU-specific memory growth setting
-        # Only configure thread pools for CPU
         tf.config.threading.set_intra_op_parallelism_threads(2)
         tf.config.threading.set_inter_op_parallelism_threads(2)
         
@@ -385,8 +376,6 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Startup failed: {str(e)}")
         raise RuntimeError(f"Initialization error: {str(e)}")
-    
-    
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -394,15 +383,12 @@ async def shutdown_event():
         if hasattr(app.state, 'executor'):
             app.state.executor.shutdown(wait=False)
             
-        # Clean up model resources
         if hasattr(app.state, 'model'):
             del app.state.model
             tf.keras.backend.clear_session()
             
-        # Clean up OpenCV resources
         cv2.destroyAllWindows()
         
-        # Force garbage collection
         import gc
         gc.collect()
         
@@ -410,8 +396,6 @@ async def shutdown_event():
     except Exception as e:
         logger.error(f"Shutdown cleanup error: {str(e)}")
 
-
-# Modified predict endpoint with cleanup
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(files: List[UploadFile] = File(...)):
     if len(files) > 100:
@@ -422,7 +406,6 @@ async def predict(files: List[UploadFile] = File(...)):
             process_single_file(f) for f in files
         ))
         
-        # Additional cleanup after all files processed
         await ResourceCleaner.cleanup()
         return results
         
@@ -430,14 +413,8 @@ async def predict(files: List[UploadFile] = File(...)):
         await ResourceCleaner.cleanup()
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(500, "Processing failed")
-    
-    
 
-@app.get("/health", 
-         response_model=HealthCheckResponse,
-         responses={
-             503: {"description": "Service unavailable"}
-         })
+@app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     try:
         return {
@@ -466,7 +443,6 @@ def custom_openapi():
         license_info=app.license_info
     )
     
-    # Add servers
     openapi_schema["servers"] = [
         {
             "url": "http://localhost:8000",
@@ -489,6 +465,6 @@ if __name__ == "__main__":
         app, 
         host="0.0.0.0", 
         port=8000,
-        workers=1,  # Single worker for limited CPU
-        limit_concurrency=4,  # Limit total concurrent requests
+        workers=1,
+        limit_concurrency=MAX_CONCURRENT_REQUESTS
     )
