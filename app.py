@@ -45,7 +45,7 @@ app = FastAPI(
 
 # Constants
 MODEL_URL = "https://www.googleapis.com/drive/v3/files/1sUNdQHfqKBCW44wGEi158W2DK71g0BZE?alt=media&key=AIzaSyAQWd9J7XainNo1hx3cUzJsklrK-wm9Sng"
-MODEL_DIR = '/tmp/model'
+MODEL_DIR = os.path.join(os.getenv('MODEL_DIR', '/tmp/model'))
 MODEL_PATH = os.path.join(MODEL_DIR, "final_model_11_4_2025.keras")
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
