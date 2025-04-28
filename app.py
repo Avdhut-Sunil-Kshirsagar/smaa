@@ -279,8 +279,29 @@ def preprocess_image(img_array: np.ndarray, target_size=(224, 224)) -> np.ndarra
         return np.zeros((*target_size, 3), dtype=np.float32)
 
 # Updated file processing
-def process_single_file(file: UploadFile):
-    """Process file entirely in memory"""
+# Add this new class for resource management
+class ResourceCleaner:
+    @staticmethod
+    async def cleanup():
+        """Clean up temporary resources after request processing"""
+        try:
+            # Clean up TensorFlow/Keras session
+            tf.keras.backend.clear_session()
+            
+            # Explicitly clean up OpenCV resources
+            cv2.destroyAllWindows()
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            logger.debug("Resources cleaned successfully")
+        except Exception as e:
+            logger.error(f"Cleanup error: {str(e)}")
+
+# Modified process_single_file function with cleanup
+async def process_single_file(file: UploadFile):
+    """Process file entirely in memory with automatic cleanup"""
     result = {
         "filename": file.filename,
         "class": None,
@@ -291,7 +312,9 @@ def process_single_file(file: UploadFile):
     
     try:
         # Read and validate directly from memory
-        file_bytes = file.file.read(MAX_FILE_SIZE + 1)
+        file_bytes = await file.read()
+        await file.close()  # Explicitly close the file
+        
         if len(file_bytes) > MAX_FILE_SIZE:
             raise ValueError("File size exceeds 10MB limit")
             
@@ -324,9 +347,18 @@ def process_single_file(file: UploadFile):
     except Exception as e:
         result["error"] = str(e)
         logger.error(f"Error processing {file.filename}: {str(e)}")
+    finally:
+        # Ensure cleanup happens even if error occurs
+        await ResourceCleaner.cleanup()
+        # Explicitly delete large objects
+        if 'img' in locals():
+            del img
+        if 'full_img' in locals():
+            del full_img
+        if 'face_img' in locals():
+            del face_img
         
     return result
-
 
 @app.on_event("startup")
 async def startup_event():
@@ -358,25 +390,44 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    if hasattr(app.state, 'executor'):
-        app.state.executor.shutdown(wait=False)
-    logger.info("Service shutdown complete.")
+    try:
+        if hasattr(app.state, 'executor'):
+            app.state.executor.shutdown(wait=False)
+            
+        # Clean up model resources
+        if hasattr(app.state, 'model'):
+            del app.state.model
+            tf.keras.backend.clear_session()
+            
+        # Clean up OpenCV resources
+        cv2.destroyAllWindows()
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
+        
+        logger.info("Service shutdown complete with resource cleanup")
+    except Exception as e:
+        logger.error(f"Shutdown cleanup error: {str(e)}")
 
+
+# Modified predict endpoint with cleanup
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(files: List[UploadFile] = File(...)):
     if len(files) > 10:
         raise HTTPException(413, "Maximum 10 files allowed")
     
-    async def process_wrapper(file: UploadFile):
-        return await asyncio.get_event_loop().run_in_executor(
-            app.state.executor,
-            process_single_file,
-            file
-        )
-    
     try:
-        return await asyncio.gather(*(process_wrapper(f) for f in files))
+        results = await asyncio.gather(*(
+            process_single_file(f) for f in files
+        ))
+        
+        # Additional cleanup after all files processed
+        await ResourceCleaner.cleanup()
+        return results
+        
     except Exception as e:
+        await ResourceCleaner.cleanup()
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(500, "Processing failed")
     
