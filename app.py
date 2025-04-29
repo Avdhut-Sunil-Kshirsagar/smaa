@@ -13,10 +13,7 @@ os.environ.update({
     'DEEPFACE_HOME': '/tmp/.deepface',
     'CUDA_VISIBLE_DEVICES': '-1',
     'TF_CPP_MIN_LOG_LEVEL': '2',
-    'TF_ENABLE_ONEDNN_OPTS': '1',
-    'TF_NUM_INTEROP_THREADS': '1',
-    'TF_NUM_INTRAOP_THREADS': '1',
-    'OMP_NUM_THREADS': '1'
+    'TF_ENABLE_ONEDNN_OPTS': '1'
 })
 
 # Configure logging
@@ -26,20 +23,15 @@ logger = logging.getLogger(__name__)
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import tensorflow as tf
-from tensorflow.keras import layers, models, mixed_precision
+from tensorflow import keras
+from tensorflow.keras import layers, models
 from deepface import DeepFace
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 from pydantic import BaseModel, Field
 
-# Set mixed precision policy
-policy = mixed_precision.Policy('mixed_float16')
-mixed_precision.set_global_policy(policy)
-
-# Constants loaded from environment
-TARGET_SIZE = (224, 224)
-CLASS_NAMES = ['AI', 'FAKE', 'REAL']
-MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 10 * 1024 * 1024))
-MAX_WORKERS = int(os.getenv('MAX_WORKERS', 2))
+# Set mixed precision policy (must keep as-is)
+policy = tf.keras.mixed_precision.Policy('mixed_float16')
+tf.keras.mixed_precision.set_global_policy(policy)
 
 app = FastAPI(
     title="Deepfake Detection API",
@@ -54,6 +46,12 @@ app = FastAPI(
         "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
     }
 )
+
+# Constants from environment
+TARGET_SIZE = (224, 224)
+CLASS_NAMES = ['AI', 'FAKE', 'REAL']
+MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 10 * 1024 * 1024))
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', 2))
 
 # Pydantic Models
 class PredictionResult(BaseModel):
@@ -72,7 +70,7 @@ class HealthCheckResponse(BaseModel):
     model_path: Optional[str]
     model_exists: Optional[bool]
 
-# Fixed Custom Layers with proper shape handling
+# Custom layers (must keep original implementation)
 class EfficientChannelAttention(layers.Layer):
     def __init__(self, channels, reduction=8, **kwargs):
         super().__init__(**kwargs)
@@ -132,14 +130,12 @@ class FixedHybridBlock(layers.Layer):
     def build(self, input_shape):
         if input_shape[-1] != self.filters:
             self.res_conv = layers.Conv2D(self.filters, 1)
-        super().build(input_shape)
 
     def call(self, inputs):
-        input_shape = tf.shape(inputs)
         residual = inputs
         
         if self.res_conv is not None:
-            residual = self.res_conv(residual)
+            residual = self.res_conv(inputs)
             
         x = self.conv1(inputs)
         x = self.norm1(x)
@@ -151,15 +147,6 @@ class FixedHybridBlock(layers.Layer):
         x = self.conv2(x)
         x = self.norm2(x)
         
-        # Ensure shapes match before addition
-        if x.shape[-1] != residual.shape[-1]:
-            residual = tf.keras.layers.Conv2D(
-                filters=x.shape[-1],
-                kernel_size=1,
-                strides=1,
-                padding='same'
-            )(residual)
-        
         return self.act(x + residual)
     
     def get_config(self):
@@ -169,58 +156,72 @@ class FixedHybridBlock(layers.Layer):
         })
         return config
 
-    def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[1], input_shape[2], self.filters)
+# Resource management functions
+def cleanup_tensors():
+    """Explicitly clear TensorFlow tensors and Keras backend"""
+    tf.keras.backend.clear_session()
+    if hasattr(app.state, 'temp_arrays'):
+        for arr in app.state.temp_arrays:
+            del arr
+        app.state.temp_arrays = []
 
-def download_model():
-    model_path = os.getenv('MODEL_PATH')
-    if not os.path.exists(model_path):
-        logger.info("Model not found at %s", model_path)
-        raise FileNotFoundError(f"Model file not found at {model_path}")
+def cleanup_files():
+    """Clean up any temporary files"""
+    if hasattr(app.state, 'temp_files'):
+        for f in app.state.temp_files:
+            try:
+                if os.path.exists(f):
+                    os.unlink(f)
+            except:
+                pass
+        app.state.temp_files = []
 
-def load_model():
-    model_path = os.getenv('MODEL_PATH')
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model file not found at {model_path}")
-    
-    custom_objects = {
-        'EfficientChannelAttention': EfficientChannelAttention,
-        'FixedSpatialAttention': FixedSpatialAttention,
-        'FixedHybridBlock': FixedHybridBlock
-    }
-    
-    try:
-        model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
-        
-        # Warm up the model
-        dummy_input = [
-            tf.cast(np.zeros((1, *TARGET_SIZE, 3)), tf.float32),
-            tf.cast(np.zeros((1, *TARGET_SIZE, 3)), tf.float32)
-        ]
-        model.predict(dummy_input, steps=1)
-        
-        return model
-    except Exception as e:
-        logger.error(f"Error loading model: {e}")
-        raise
+def cleanup_resources():
+    """Clean all temporary resources"""
+    cleanup_tensors()
+    cleanup_files()
+    if hasattr(app.state, 'last_images'):
+        del app.state.last_images
+    if hasattr(app.state, 'last_predictions'):
+        del app.state.last_predictions
 
+# FaceCropper with resource management
 class FaceCropper:
     def __init__(self):
         logger.info("DeepFace detector initialized successfully.")
 
     def safe_crop(self, img_array: np.ndarray) -> np.ndarray:
+        """Process image with cleanup"""
         try:
             img_rgb = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
+            
             faces = DeepFace.extract_faces(
                 img_path=img_rgb,
                 detector_backend='opencv',
                 enforce_detection=False,
                 align=False
             )
-            return cv2.resize(faces[0]['face'] if faces else img_array, TARGET_SIZE)
+            
+            result = cv2.resize(faces[0]['face'] if faces else img_array, TARGET_SIZE)
+            del img_rgb, faces
+            return result
+            
         except Exception as e:
             logger.error(f"Face processing error: {str(e)}")
             return cv2.resize(img_array, TARGET_SIZE)
+
+# Image processing with cleanup
+def preprocess_image(img_array: np.ndarray) -> np.ndarray:
+    """Process image with cleanup"""
+    try:
+        img = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
+        img = img.astype(np.float32) / 255.0
+        result = cv2.resize(img, TARGET_SIZE)
+        del img
+        return result
+    except Exception as e:
+        logger.error(f"Preprocessing error: {str(e)}")
+        return np.zeros((*TARGET_SIZE, 3), dtype=np.float32)
 
 def is_valid_image(file_bytes):
     try:
@@ -231,27 +232,9 @@ def is_valid_image(file_bytes):
     except Exception:
         return False
 
-def preprocess_image(img_array: np.ndarray) -> np.ndarray:
-    try:
-        img = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
-        img = img.astype(np.float32) / 255.0
-        return cv2.resize(img, TARGET_SIZE)
-    except Exception as e:
-        logger.error(f"Preprocessing error: {str(e)}")
-        return np.zeros((*TARGET_SIZE, 3), dtype=np.float32)
-
-def cleanup_resources():
-    tf.keras.backend.clear_session()
-    if hasattr(app.state, 'temp_files'):
-        for f in app.state.temp_files:
-            try:
-                if os.path.exists(f):
-                    os.unlink(f)
-            except Exception:
-                pass
-        app.state.temp_files = []
-
+# File processing with resource management
 def process_single_file(file: UploadFile):
+    """Process file with explicit cleanup"""
     result = {
         "filename": file.filename,
         "class": None,
@@ -261,6 +244,7 @@ def process_single_file(file: UploadFile):
     }
     
     try:
+        # Read and validate
         file_bytes = file.file.read(MAX_FILE_SIZE + 1)
         if len(file_bytes) > MAX_FILE_SIZE:
             raise ValueError("File size exceeds limit")
@@ -268,18 +252,29 @@ def process_single_file(file: UploadFile):
         if not is_valid_image(file_bytes):
             raise ValueError("Invalid image format")
         
+        # Convert to numpy array
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
             raise ValueError("Invalid image data")
         
+        # Process with cleanup
         full_img = preprocess_image(img)
         face_img = app.state.cropper.safe_crop(img)
         
+        # Store temp arrays for later cleanup
+        if not hasattr(app.state, 'temp_arrays'):
+            app.state.temp_arrays = []
+        app.state.temp_arrays.extend([full_img, face_img])
+        
+        # Predict with cleanup
         prediction = app.state.model.predict([
             np.array([full_img]), 
             np.array([face_img])
         ], verbose=0)[0]
+        
+        # Cleanup immediately
+        del full_img, face_img, img, nparr, file_bytes
         
         result.update({
             "class": CLASS_NAMES[np.argmax(prediction)],
@@ -296,23 +291,45 @@ def process_single_file(file: UploadFile):
 @app.on_event("startup")
 async def startup_event():
     try:
+        # Configure TensorFlow
         tf.config.optimizer.set_experimental_options({
+            'layout_optimizer': False,
             'constant_folding': True,
             'shape_optimization': True,
             'remapping': False,
             'arithmetic_optimization': True,
         })
         
-        tf.config.threading.set_intra_op_parallelism_threads(1)
-        tf.config.threading.set_inter_op_parallelism_threads(1)
+        tf.config.threading.set_intra_op_parallelism_threads(2)
+        tf.config.threading.set_inter_op_parallelism_threads(2)
         
-        download_model()
-        app.state.model = load_model()
+        # Load model with custom objects
+        model_path = os.getenv('MODEL_PATH')
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model not found at {model_path}")
+            
+        custom_objects = {
+            'EfficientChannelAttention': EfficientChannelAttention,
+            'FixedSpatialAttention': FixedSpatialAttention,
+            'FixedHybridBlock': FixedHybridBlock
+        }
+        
+        app.state.model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
         app.state.cropper = FaceCropper()
         app.state.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-        app.state.temp_files = []
         
-        logger.info("Service initialized successfully")
+        # Initialize resource tracking
+        app.state.temp_files = []
+        app.state.temp_arrays = []
+        
+        # Warm up model
+        dummy_input = [
+            tf.convert_to_tensor(np.zeros((1, *TARGET_SIZE, 3))),
+            tf.convert_to_tensor(np.zeros((1, *TARGET_SIZE, 3)))
+        ]
+        app.state.model.predict(dummy_input, steps=1)
+        
+        logger.info("Service initialized with resource tracking")
     except Exception as e:
         logger.error(f"Startup failed: {str(e)}")
         raise RuntimeError(f"Initialization error: {str(e)}")
@@ -338,22 +355,22 @@ async def predict(files: List[UploadFile] = File(...)):
     
     try:
         results = await asyncio.gather(*(process_wrapper(f) for f in files))
-        cleanup_resources()
+        cleanup_resources()  # Explicit cleanup after processing
         return results
     except Exception as e:
-        cleanup_resources()
+        cleanup_resources()  # Cleanup even on error
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(500, "Processing failed")
 
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     try:
-        model_path = os.getenv('MODEL_PATH')
+        model_exists = os.path.exists(os.getenv('MODEL_PATH'))
         return {
             "status": "healthy",
             "model_loaded": hasattr(app.state, "model"),
-            "model_path": model_path,
-            "model_exists": os.path.exists(model_path) if model_path else None
+            "model_path": os.getenv('MODEL_PATH'),
+            "model_exists": model_exists
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
