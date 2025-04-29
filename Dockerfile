@@ -31,7 +31,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-glx \
     libglib2.0-0 && \
     rm -rf /var/lib/apt/lists/* && \
-    chmod -R a+r /app/model && \
     python -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir -U pip
 
