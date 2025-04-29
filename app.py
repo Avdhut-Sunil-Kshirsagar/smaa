@@ -396,6 +396,9 @@ async def predict(files: List[UploadFile] = File(...)):
             # Ensure cleanup happens even if error occurs
             resource_mgr.cleanup()
             del resource_mgr
+            if hasattr(app.state, 'executor'):
+                app.state.executor.shutdown(wait=False)
+            tf.keras.backend.clear_session()
             
         return result
     
