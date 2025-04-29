@@ -7,7 +7,6 @@ import numpy as np
 import cv2
 import imghdr
 from concurrent.futures import ThreadPoolExecutor
-import psutil
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -70,9 +69,10 @@ class PredictionResult(BaseModel):
     confidence: float = Field(..., ge=0, le=1)
     probabilities: Dict[str, float]
     error: Optional[str] = None
-    storage_before: Optional[Dict] = Field(None, description="Storage usage before processing")
-    storage_after: Optional[Dict] = Field(None, description="Storage usage after processing")
-    storage_diff: Optional[Dict] = Field(None, description="Storage differences")
+    temp_dir_size_before: Optional[float] = None
+    temp_dir_size_after: Optional[float] = None
+    deepface_dir_size_before: Optional[float] = None
+    deepface_dir_size_after: Optional[float] = None
 
     class Config:
         allow_population_by_field_name = True
@@ -82,11 +82,10 @@ class HealthCheckResponse(BaseModel):
     model_loaded: bool
     model_path: Optional[str]
     model_exists: Optional[bool]
-    storage: Dict[str, Union[int, float, str]]
     temp_dir_info: Optional[StorageInfo]
     deepface_dir_info: Optional[StorageInfo]
 
-# Storage monitoring functions
+# Storage monitoring functions (without psutil)
 def scan_directory(path: str) -> StorageInfo:
     """Scan a directory and return its contents and size"""
     path_obj = Path(path)
@@ -115,48 +114,22 @@ def scan_directory(path: str) -> StorageInfo:
     )
 
 def get_storage_info() -> Dict:
-    """Get detailed storage information"""
-    partitions = []
-    for partition in psutil.disk_partitions():
-        try:
-            usage = psutil.disk_usage(partition.mountpoint)
-            partitions.append({
-                "device": partition.device,
-                "mountpoint": partition.mountpoint,
-                "total_gb": round(usage.total / (1024**3), 2),
-                "used_gb": round(usage.used / (1024**3), 2),
-                "free_gb": round(usage.free / (1024**3), 2),
-                "percent_used": usage.percent
-            })
-        except Exception as e:
-            logger.warning(f"Could not get partition info for {partition.mountpoint}: {str(e)}")
-    
+    """Get storage information without psutil"""
     return {
-        "partitions": partitions,
         "timestamp": datetime.now().isoformat(),
         "temp_dir": scan_directory('/tmp'),
         "deepface_dir": scan_directory('/tmp/.deepface')
     }
 
-def track_storage_changes(before: Dict, after: Dict) -> Dict:
-    """Calculate storage changes between two states"""
-    changes = {}
-    
-    # Track partition changes
-    for before_part, after_part in zip(before['partitions'], after['partitions']):
-        if before_part['mountpoint'] == after_part['mountpoint']:
-            changes[before_part['mountpoint']] = {
-                "used_diff_mb": round((after_part['used_gb'] - before_part['used_gb']) * 1024, 2),
-                "free_diff_mb": round((after_part['free_gb'] - before_part['free_gb']) * 1024, 2)
-            }
-    
-    # Track directory changes
-    for dir_type in ['temp_dir', 'deepface_dir']:
-        changes[f"{dir_type}_size_diff_mb"] = after[dir_type].size_mb - before[dir_type].size_mb
-        changes[f"{dir_type}_files_diff"] = len(after[dir_type].files) - len(before[dir_type].files)
-        changes[f"{dir_type}_dirs_diff"] = len(after[dir_type].directories) - len(before[dir_type].directories)
-    
-    return changes
+def get_dir_size(path: str) -> float:
+    """Get directory size in MB without psutil"""
+    try:
+        if os.path.exists(path):
+            return round(sum(f.stat().st_size for f in Path(path).rglob('*') if f.is_file()) / (1024 * 1024), 2)
+        return 0
+    except Exception as e:
+        logger.warning(f"Could not get size for {path}: {str(e)}")
+        return 0
 
 # Custom layers (must keep original implementation)
 class EfficientChannelAttention(layers.Layer):
@@ -244,7 +217,7 @@ class FixedHybridBlock(layers.Layer):
         })
         return config
 
-# Resource management with enhanced storage tracking
+# Resource management with storage tracking
 class ResourceTracker:
     def __init__(self):
         self.temp_files = []
@@ -303,16 +276,9 @@ class ResourceTracker:
     
     def cleanup_all(self):
         """Clean all temporary resources with storage tracking"""
-        before_storage = get_storage_info()
-        
         self.cleanup_tensors()
         self.cleanup_files()
         self.cleanup_deepface_cache()
-        
-        after_storage = get_storage_info()
-        storage_changes = track_storage_changes(before_storage, after_storage)
-        
-        logger.info(f"Resource cleanup completed. Storage changes: {storage_changes}")
 
 # FaceCropper with resource management
 class FaceCropper:
@@ -371,7 +337,8 @@ def is_valid_image(file_bytes):
 def process_single_file(file: UploadFile, resource_tracker: ResourceTracker):
     """Process file with explicit cleanup and storage monitoring"""
     # Get initial storage state
-    initial_storage = get_storage_info()
+    temp_dir_size_before = get_dir_size('/tmp')
+    deepface_dir_size_before = get_dir_size('/tmp/.deepface')
     
     result = {
         "filename": file.filename,
@@ -379,9 +346,8 @@ def process_single_file(file: UploadFile, resource_tracker: ResourceTracker):
         "confidence": None,
         "probabilities": None,
         "error": None,
-        "storage_before": initial_storage,
-        "storage_after": None,
-        "storage_diff": None
+        "temp_dir_size_before": temp_dir_size_before,
+        "deepface_dir_size_before": deepface_dir_size_before
     }
     
     try:
@@ -414,16 +380,16 @@ def process_single_file(file: UploadFile, resource_tracker: ResourceTracker):
         ], verbose=0)[0]
         
         # Get storage usage after processing
-        current_storage = get_storage_info()
-        storage_changes = track_storage_changes(initial_storage, current_storage)
+        temp_dir_size_after = get_dir_size('/tmp')
+        deepface_dir_size_after = get_dir_size('/tmp/.deepface')
         
         # Update result with storage info
         result.update({
             "class": CLASS_NAMES[np.argmax(prediction)],
             "confidence": float(np.max(prediction)),
             "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)},
-            "storage_after": current_storage,
-            "storage_diff": storage_changes
+            "temp_dir_size_after": temp_dir_size_after,
+            "deepface_dir_size_after": deepface_dir_size_after
         })
         
     except Exception as e:
@@ -523,12 +489,6 @@ async def health_check():
             "model_loaded": hasattr(app.state, "model"),
             "model_path": os.getenv('MODEL_PATH'),
             "model_exists": model_exists,
-            "storage": {
-                "total_space_gb": sum(p['total_gb'] for p in storage_info['partitions']),
-                "used_space_gb": sum(p['used_gb'] for p in storage_info['partitions']),
-                "temp_dir_size_mb": storage_info['temp_dir'].size_mb,
-                "deepface_dir_size_mb": storage_info['deepface_dir'].size_mb
-            },
             "temp_dir_info": storage_info['temp_dir'],
             "deepface_dir_info": storage_info['deepface_dir']
         }
