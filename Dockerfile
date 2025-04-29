@@ -47,10 +47,12 @@ COPY app.py .
 RUN apt-get purge -y --auto-remove && \
     rm -rf /root/.cache /tmp/*
 
-# Run as non-root user
-RUN useradd -mU appuser && \
-    chown -R appuser:appuser /app
-USER appuser
+# Create non-root user with UID in 10000-20000 range
+RUN useradd -mU -u 15000 appuser && \
+    chown -R appuser:appuser /app && \
+    chmod -R 755 /app
+
+USER 15000
 
 EXPOSE 8000
 
