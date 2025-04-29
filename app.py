@@ -8,6 +8,7 @@ import imghdr
 from concurrent.futures import ThreadPoolExecutor
 import shutil
 from pathlib import Path
+from datetime import datetime
 
 # Configure environment before any imports
 os.environ.update({
@@ -27,7 +28,7 @@ from fastapi.responses import JSONResponse
 import tensorflow as tf
 from tensorflow.keras import layers, models
 from deepface import DeepFace
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from pydantic import BaseModel, Field
 
 # Set mixed precision policy
@@ -36,7 +37,7 @@ tf.keras.mixed_precision.set_global_policy(policy)
 
 app = FastAPI(
     title="Deepfake Detection API",
-    description="API with strict resource management for detecting deepfake images",
+    description="API with comprehensive resource monitoring",
     version="1.0"
 )
 
@@ -45,14 +46,88 @@ TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_WORKERS = 2
+MONITORED_DIRS = ['/tmp', '/tmp/.deepface', '/app']  # Directories to monitor
 
 # Pydantic Models
+class DirectoryInfo(BaseModel):
+    path: str
+    size_mb: float
+    file_count: int
+    directory_count: int
+    files: List[str] = []
+    directories: List[str] = []
+
+class StorageSnapshot(BaseModel):
+    timestamp: str
+    directories: Dict[str, DirectoryInfo]
+    total_size_mb: float
+
 class PredictionResult(BaseModel):
     filename: str
     class_: str = Field(..., alias="class")
     confidence: float
     probabilities: Dict[str, float]
     error: Optional[str] = None
+    storage_before: Optional[StorageSnapshot] = None
+    storage_after: Optional[StorageSnapshot] = None
+    storage_diff_mb: Optional[float] = None
+
+# Directory monitoring functions
+def get_directory_info(path: str, detailed: bool = False) -> DirectoryInfo:
+    """Get detailed information about a directory"""
+    path_obj = Path(path)
+    size_bytes = 0
+    file_count = 0
+    dir_count = 0
+    files = []
+    directories = []
+
+    if not path_obj.exists():
+        return DirectoryInfo(
+            path=path,
+            size_mb=0,
+            file_count=0,
+            directory_count=0
+        )
+
+    for item in path_obj.rglob('*'):
+        try:
+            if item.is_file():
+                size_bytes += item.stat().st_size
+                file_count += 1
+                if detailed:
+                    files.append(str(item.relative_to(path_obj)))
+            elif item.is_dir():
+                dir_count += 1
+                if detailed:
+                    directories.append(str(item.relative_to(path_obj)))
+        except Exception as e:
+            logger.warning(f"Could not scan {item}: {str(e)}")
+
+    return DirectoryInfo(
+        path=path,
+        size_mb=round(size_bytes / (1024 * 1024), 2),
+        file_count=file_count,
+        directory_count=dir_count,
+        files=files if detailed else [],
+        directories=directories if detailed else []
+    )
+
+def get_storage_snapshot(detailed: bool = False) -> StorageSnapshot:
+    """Get snapshot of storage usage across monitored directories"""
+    dirs = {}
+    total_size = 0.0
+    
+    for dir_path in MONITORED_DIRS:
+        dir_info = get_directory_info(dir_path, detailed)
+        dirs[dir_path] = dir_info
+        total_size += dir_info.size_mb
+    
+    return StorageSnapshot(
+        timestamp=datetime.now().isoformat(),
+        directories=dirs,
+        total_size_mb=round(total_size, 2)
+    )
 
 # Custom layers (unchanged from your working version)
 class EfficientChannelAttention(layers.Layer):
@@ -248,7 +323,8 @@ async def startup_event():
         dummy_input = np.zeros((1, *TARGET_SIZE, 3))
         app.state.model.predict([dummy_input, dummy_input], steps=1)
         
-        logger.info("Service initialized with strict resource management")
+        logger.info("Service initialized with comprehensive resource monitoring")
+        logger.info(f"Initial storage state: {get_storage_snapshot().dict()}")
     except Exception as e:
         logger.error(f"Startup failed: {str(e)}")
         raise RuntimeError(f"Initialization error: {str(e)}")
@@ -259,6 +335,7 @@ async def shutdown_event():
         app.state.executor.shutdown(wait=False)
     tf.keras.backend.clear_session()
     logger.info("Service shutdown complete")
+    logger.info(f"Final storage state: {get_storage_snapshot().dict()}")
 
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(files: List[UploadFile] = File(...)):
@@ -268,12 +345,19 @@ async def predict(files: List[UploadFile] = File(...)):
     async def process_wrapper(file: UploadFile):
         # Create resource manager for this request
         resource_mgr = RequestResourceManager()
+        
+        # Get initial storage state
+        storage_before = get_storage_snapshot(detailed=True)
+        
         result = {
             "filename": file.filename,
             "class": None,
             "confidence": None,
             "probabilities": None,
-            "error": None
+            "error": None,
+            "storage_before": storage_before,
+            "storage_after": None,
+            "storage_diff_mb": None
         }
         
         try:
@@ -294,10 +378,15 @@ async def predict(files: List[UploadFile] = File(...)):
                 np.array([face_img])
             ], verbose=0)[0]
             
+            # Get storage state after processing
+            storage_after = get_storage_snapshot(detailed=True)
+            
             result.update({
                 "class": CLASS_NAMES[np.argmax(prediction)],
                 "confidence": float(np.max(prediction)),
-                "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)}
+                "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)},
+                "storage_after": storage_after,
+                "storage_diff_mb": round(storage_after.total_size_mb - storage_before.total_size_mb, 2)
             })
             
         except Exception as e:
@@ -315,6 +404,11 @@ async def predict(files: List[UploadFile] = File(...)):
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(500, "Processing failed")
+
+@app.get("/storage", response_model=StorageSnapshot)
+async def get_current_storage():
+    """Endpoint to get current storage usage"""
+    return get_storage_snapshot(detailed=True)
 
 if __name__ == "__main__":
     import uvicorn
