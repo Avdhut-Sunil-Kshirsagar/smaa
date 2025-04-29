@@ -1,14 +1,12 @@
 import os
 import sys
 import asyncio
-import tempfile
 import logging
 import numpy as np
 import cv2
 import imghdr
 from concurrent.futures import ThreadPoolExecutor
 import shutil
-from datetime import datetime
 from pathlib import Path
 
 # Configure environment before any imports
@@ -16,7 +14,8 @@ os.environ.update({
     'DEEPFACE_HOME': '/tmp/.deepface',
     'CUDA_VISIBLE_DEVICES': '-1',
     'TF_CPP_MIN_LOG_LEVEL': '2',
-    'TF_ENABLE_ONEDNN_OPTS': '1'
+    'TF_ENABLE_ONEDNN_OPTS': '1',
+    'DEEPFACE_CACHE': '0'  # Disable DeepFace caching
 })
 
 # Configure logging
@@ -26,118 +25,41 @@ logger = logging.getLogger(__name__)
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import tensorflow as tf
-from tensorflow import keras
 from tensorflow.keras import layers, models
 from deepface import DeepFace
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional
 from pydantic import BaseModel, Field
 
-# Set mixed precision policy (must keep as-is)
+# Set mixed precision policy
 policy = tf.keras.mixed_precision.Policy('mixed_float16')
 tf.keras.mixed_precision.set_global_policy(policy)
 
 app = FastAPI(
     title="Deepfake Detection API",
-    description="API for detecting deepfake, real and AI-generated images with storage monitoring",
-    version="1.0",
-    contact={
-        "name": "API Support",
-        "email": "support@example.com"
-    },
-    license_info={
-        "name": "Apache 2.0",
-        "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
-    }
+    description="API with strict resource management for detecting deepfake images",
+    version="1.0"
 )
 
-# Constants from environment
+# Constants
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
-MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 10 * 1024 * 1024))
-MAX_WORKERS = int(os.getenv('MAX_WORKERS', 2))
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_WORKERS = 2
 
 # Pydantic Models
-class StorageInfo(BaseModel):
-    path: str
-    size_mb: float
-    files: List[str]
-    directories: List[str]
-
 class PredictionResult(BaseModel):
     filename: str
     class_: str = Field(..., alias="class")
-    confidence: float = Field(..., ge=0, le=1)
+    confidence: float
     probabilities: Dict[str, float]
     error: Optional[str] = None
-    temp_dir_size_before: Optional[float] = None
-    temp_dir_size_after: Optional[float] = None
-    deepface_dir_size_before: Optional[float] = None
-    deepface_dir_size_after: Optional[float] = None
 
-    class Config:
-        allow_population_by_field_name = True
-
-class HealthCheckResponse(BaseModel):
-    status: str
-    model_loaded: bool
-    model_path: Optional[str]
-    model_exists: Optional[bool]
-    temp_dir_info: Optional[StorageInfo]
-    deepface_dir_info: Optional[StorageInfo]
-
-# Storage monitoring functions (without psutil)
-def scan_directory(path: str) -> StorageInfo:
-    """Scan a directory and return its contents and size"""
-    path_obj = Path(path)
-    if not path_obj.exists():
-        return StorageInfo(path=path, size_mb=0, files=[], directories=[])
-    
-    total_size = 0
-    files = []
-    directories = []
-    
-    for item in path_obj.rglob('*'):
-        try:
-            if item.is_file():
-                total_size += item.stat().st_size
-                files.append(str(item.relative_to(path_obj)))
-            elif item.is_dir():
-                directories.append(str(item.relative_to(path_obj)))
-        except Exception as e:
-            logger.warning(f"Could not scan {item}: {str(e)}")
-    
-    return StorageInfo(
-        path=path,
-        size_mb=round(total_size / (1024 * 1024), 2),
-        files=files,
-        directories=directories
-    )
-
-def get_storage_info() -> Dict:
-    """Get storage information without psutil"""
-    return {
-        "timestamp": datetime.now().isoformat(),
-        "temp_dir": scan_directory('/tmp'),
-        "deepface_dir": scan_directory('/tmp/.deepface')
-    }
-
-def get_dir_size(path: str) -> float:
-    """Get directory size in MB without psutil"""
-    try:
-        if os.path.exists(path):
-            return round(sum(f.stat().st_size for f in Path(path).rglob('*') if f.is_file()) / (1024 * 1024), 2)
-        return 0
-    except Exception as e:
-        logger.warning(f"Could not get size for {path}: {str(e)}")
-        return 0
-
-# Custom layers (must keep original implementation)
+# Custom layers (unchanged from your working version)
 class EfficientChannelAttention(layers.Layer):
     def __init__(self, channels, reduction=8, **kwargs):
         super().__init__(**kwargs)
         self.channels = channels
         self.reduction = reduction
-        
         self.avg_pool = layers.GlobalAveragePooling2D()
         self.max_pool = layers.GlobalMaxPooling2D()
         self.fc = models.Sequential([
@@ -178,7 +100,6 @@ class FixedHybridBlock(layers.Layer):
     def __init__(self, filters, **kwargs):
         super().__init__(**kwargs)
         self.filters = filters
-        
         self.conv1 = layers.Conv2D(filters, 3, padding='same')
         self.conv2 = layers.Conv2D(filters, 3, padding='same')
         self.eca = EfficientChannelAttention(filters)
@@ -194,20 +115,15 @@ class FixedHybridBlock(layers.Layer):
 
     def call(self, inputs):
         residual = inputs
-        
         if self.res_conv is not None:
             residual = self.res_conv(inputs)
-            
         x = self.conv1(inputs)
         x = self.norm1(x)
         x = self.act(x)
-        
         x = self.eca(x)
         x = self.sa(x)
-            
         x = self.conv2(x)
         x = self.norm2(x)
-        
         return self.act(x + residual)
     
     def get_config(self):
@@ -217,207 +133,108 @@ class FixedHybridBlock(layers.Layer):
         })
         return config
 
-# Resource management with storage tracking
-class ResourceTracker:
+class RequestResourceManager:
+    """Manages all resources for a single request"""
     def __init__(self):
         self.temp_files = []
         self.temp_arrays = []
-        self.temp_dirs = []
+        self.cleanup_complete = False
     
     def add_temp_file(self, path):
         self.temp_files.append(path)
     
-    def add_temp_dir(self, path):
-        self.temp_dirs.append(path)
-    
     def add_temp_array(self, arr):
         self.temp_arrays.append(arr)
     
-    def cleanup_tensors(self):
-        """Explicitly clear TensorFlow tensors and Keras backend"""
+    def cleanup(self):
+        """Ensure all resources are released"""
+        if self.cleanup_complete:
+            return
+            
+        # Clear TensorFlow session
         tf.keras.backend.clear_session()
+        
+        # Delete numpy arrays
         for arr in self.temp_arrays:
             del arr
-        self.temp_arrays = []
-    
-    def cleanup_files(self):
-        """Clean up any temporary files with storage tracking"""
-        deleted_size = 0
+        
+        # Remove temporary files
         for f in self.temp_files:
             try:
                 if os.path.exists(f):
-                    deleted_size += os.path.getsize(f)
                     os.unlink(f)
-            except Exception as e:
-                logger.warning(f"Could not delete temp file {f}: {str(e)}")
-        self.temp_files = []
-        
-        for d in self.temp_dirs:
-            try:
-                if os.path.exists(d):
-                    deleted_size += sum(f.stat().st_size for f in Path(d).rglob('*') if f.is_file())
-                    shutil.rmtree(d)
-            except Exception as e:
-                logger.warning(f"Could not delete temp dir {d}: {str(e)}")
-        self.temp_dirs = []
-        
-        logger.info(f"Cleaned up {round(deleted_size / (1024 * 1024), 2)} MB of temporary files/dirs")
-    
-    def cleanup_deepface_cache(self):
-        """Clean DeepFace cache with storage tracking"""
+            except:
+                pass
+                
+        # Clear DeepFace cache
         cache_path = os.path.join(os.environ['DEEPFACE_HOME'], '.deepface')
         if os.path.exists(cache_path):
-            before_size = sum(f.stat().st_size for f in Path(cache_path).rglob('*') if f.is_file()) / (1024 * 1024)
             try:
                 shutil.rmtree(cache_path)
-                logger.info(f"Cleaned up DeepFace cache (freed {round(before_size, 2)} MB)")
-            except Exception as e:
-                logger.error(f"Error cleaning DeepFace cache: {str(e)}")
-    
-    def cleanup_all(self):
-        """Clean all temporary resources with storage tracking"""
-        self.cleanup_tensors()
-        self.cleanup_files()
-        self.cleanup_deepface_cache()
-
-# FaceCropper with resource management
-class FaceCropper:
-    def __init__(self):
-        logger.info("DeepFace detector initialized successfully.")
-        self.resource_tracker = ResourceTracker()
-
-    def safe_crop(self, img_array: np.ndarray) -> np.ndarray:
-        """Process image with cleanup"""
-        try:
-            img_rgb = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
-            
-            # Create temp file for DeepFace processing
-            temp_file = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False).name
-            cv2.imwrite(temp_file, img_rgb)
-            self.resource_tracker.add_temp_file(temp_file)
-            
-            faces = DeepFace.extract_faces(
-                img_path=temp_file,
-                detector_backend='opencv',
-                enforce_detection=False,
-                align=False
-            )
-            
-            result = cv2.resize(faces[0]['face'] if faces else img_array, TARGET_SIZE)
-            del img_rgb, faces
-            return result
-            
-        except Exception as e:
-            logger.error(f"Face processing error: {str(e)}")
-            return cv2.resize(img_array, TARGET_SIZE)
-
-# Image processing with cleanup
-def preprocess_image(img_array: np.ndarray) -> np.ndarray:
-    """Process image with cleanup"""
-    try:
-        img = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
-        img = img.astype(np.float32) / 255.0
-        result = cv2.resize(img, TARGET_SIZE)
-        del img
-        return result
-    except Exception as e:
-        logger.error(f"Preprocessing error: {str(e)}")
-        return np.zeros((*TARGET_SIZE, 3), dtype=np.float32)
+            except:
+                pass
+                
+        self.cleanup_complete = True
+        logger.info("Request resources cleaned up")
 
 def is_valid_image(file_bytes):
+    """Validate image without creating temporary files"""
     try:
         if len(file_bytes) > MAX_FILE_SIZE:
             return False
-        image_type = imghdr.what(None, h=file_bytes)
-        return image_type in ['jpeg', 'jpg', 'png', 'bmp']
-    except Exception:
+        return imghdr.what(None, h=file_bytes) in ['jpeg', 'jpg', 'png']
+    except:
         return False
 
-# File processing with resource management
-def process_single_file(file: UploadFile, resource_tracker: ResourceTracker):
-    """Process file with explicit cleanup and storage monitoring"""
-    # Get initial storage state
-    temp_dir_size_before = get_dir_size('/tmp')
-    deepface_dir_size_before = get_dir_size('/tmp/.deepface')
-    
-    result = {
-        "filename": file.filename,
-        "class": None,
-        "confidence": None,
-        "probabilities": None,
-        "error": None,
-        "temp_dir_size_before": temp_dir_size_before,
-        "deepface_dir_size_before": deepface_dir_size_before
-    }
-    
+def process_image_in_memory(file_bytes, resource_mgr):
+    """Process image entirely in memory"""
     try:
-        # Read and validate
-        file_bytes = file.file.read(MAX_FILE_SIZE + 1)
-        if len(file_bytes) > MAX_FILE_SIZE:
-            raise ValueError("File size exceeds limit")
-            
-        if not is_valid_image(file_bytes):
-            raise ValueError("Invalid image format")
-        
-        # Convert to numpy array
+        # Convert bytes to numpy array
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
             raise ValueError("Invalid image data")
         
-        # Process with cleanup
-        full_img = preprocess_image(img)
-        face_img = app.state.cropper.safe_crop(img)
+        # Preprocess full image
+        full_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        full_img = full_img.astype(np.float32) / 255.0
+        full_img = cv2.resize(full_img, TARGET_SIZE)
+        
+        # Process face crop in memory
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        faces = DeepFace.extract_faces(
+            img_path=img_rgb,  # Pass array directly
+            detector_backend='opencv',
+            enforce_detection=False,
+            align=False
+        )
+        face_img = cv2.resize(faces[0]['face'] if faces else img, TARGET_SIZE)
         
         # Track resources
-        resource_tracker.add_temp_array(full_img)
-        resource_tracker.add_temp_array(face_img)
+        resource_mgr.add_temp_array(full_img)
+        resource_mgr.add_temp_array(face_img)
         
-        # Predict
-        prediction = app.state.model.predict([
-            np.array([full_img]), 
-            np.array([face_img])
-        ], verbose=0)[0]
-        
-        # Get storage usage after processing
-        temp_dir_size_after = get_dir_size('/tmp')
-        deepface_dir_size_after = get_dir_size('/tmp/.deepface')
-        
-        # Update result with storage info
-        result.update({
-            "class": CLASS_NAMES[np.argmax(prediction)],
-            "confidence": float(np.max(prediction)),
-            "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)},
-            "temp_dir_size_after": temp_dir_size_after,
-            "deepface_dir_size_after": deepface_dir_size_after
-        })
+        return full_img, face_img
         
     except Exception as e:
-        result["error"] = str(e)
-        logger.error(f"Error processing {file.filename}: {str(e)}")
-        
-    return result
+        logger.error(f"Image processing error: {str(e)}")
+        raise
 
 @app.on_event("startup")
 async def startup_event():
     try:
-        # Configure TensorFlow
+        # Configure TensorFlow for minimal resource usage
         tf.config.optimizer.set_experimental_options({
-            'layout_optimizer': False,
             'constant_folding': True,
             'shape_optimization': True,
-            'remapping': False,
             'arithmetic_optimization': True,
         })
         
-        tf.config.threading.set_intra_op_parallelism_threads(2)
-        tf.config.threading.set_inter_op_parallelism_threads(2)
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        tf.config.threading.set_inter_op_parallelism_threads(1)
         
         # Load model with custom objects
         model_path = os.getenv('MODEL_PATH')
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model not found at {model_path}")
-            
         custom_objects = {
             'EfficientChannelAttention': EfficientChannelAttention,
             'FixedSpatialAttention': FixedSpatialAttention,
@@ -425,29 +242,22 @@ async def startup_event():
         }
         
         app.state.model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
-        app.state.cropper = FaceCropper()
         app.state.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-        app.state.resource_tracker = ResourceTracker()
         
         # Warm up model
-        dummy_input = [
-            tf.convert_to_tensor(np.zeros((1, *TARGET_SIZE, 3))),
-            tf.convert_to_tensor(np.zeros((1, *TARGET_SIZE, 3)))
-        ]
-        app.state.model.predict(dummy_input, steps=1)
+        dummy_input = np.zeros((1, *TARGET_SIZE, 3))
+        app.state.model.predict([dummy_input, dummy_input], steps=1)
         
-        logger.info("Service initialized with resource tracking")
-        logger.info(f"Initial storage state: {get_storage_info()}")
+        logger.info("Service initialized with strict resource management")
     except Exception as e:
         logger.error(f"Startup failed: {str(e)}")
         raise RuntimeError(f"Initialization error: {str(e)}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    if hasattr(app.state, 'resource_tracker'):
-        app.state.resource_tracker.cleanup_all()
     if hasattr(app.state, 'executor'):
         app.state.executor.shutdown(wait=False)
+    tf.keras.backend.clear_session()
     logger.info("Service shutdown complete")
 
 @app.post("/predict", response_model=List[PredictionResult])
@@ -456,54 +266,55 @@ async def predict(files: List[UploadFile] = File(...)):
         raise HTTPException(413, "Maximum 10 files allowed")
     
     async def process_wrapper(file: UploadFile):
-        return await asyncio.get_event_loop().run_in_executor(
-            app.state.executor,
-            process_single_file,
-            file,
-            app.state.resource_tracker
-        )
+        # Create resource manager for this request
+        resource_mgr = RequestResourceManager()
+        result = {
+            "filename": file.filename,
+            "class": None,
+            "confidence": None,
+            "probabilities": None,
+            "error": None
+        }
+        
+        try:
+            # Read and validate
+            file_bytes = file.file.read(MAX_FILE_SIZE + 1)
+            if len(file_bytes) > MAX_FILE_SIZE:
+                raise ValueError("File size exceeds limit")
+                
+            if not is_valid_image(file_bytes):
+                raise ValueError("Invalid image format")
+            
+            # Process in memory
+            full_img, face_img = process_image_in_memory(file_bytes, resource_mgr)
+            
+            # Predict
+            prediction = app.state.model.predict([
+                np.array([full_img]), 
+                np.array([face_img])
+            ], verbose=0)[0]
+            
+            result.update({
+                "class": CLASS_NAMES[np.argmax(prediction)],
+                "confidence": float(np.max(prediction)),
+                "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)}
+            })
+            
+        except Exception as e:
+            result["error"] = str(e)
+            logger.error(f"Error processing {file.filename}: {str(e)}")
+        finally:
+            # Ensure cleanup happens even if error occurs
+            resource_mgr.cleanup()
+            del resource_mgr
+            
+        return result
     
     try:
-        # Cleanup before processing new batch
-        app.state.resource_tracker.cleanup_all()
-        
-        results = await asyncio.gather(*(process_wrapper(f) for f in files))
-        
-        # Cleanup after processing
-        app.state.resource_tracker.cleanup_all()
-        
-        return results
+        return await asyncio.gather(*(process_wrapper(f) for f in files))
     except Exception as e:
-        app.state.resource_tracker.cleanup_all()
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(500, "Processing failed")
-
-@app.get("/health", response_model=HealthCheckResponse)
-async def health_check():
-    try:
-        model_exists = os.path.exists(os.getenv('MODEL_PATH'))
-        storage_info = get_storage_info()
-        
-        return {
-            "status": "healthy",
-            "model_loaded": hasattr(app.state, "model"),
-            "model_path": os.getenv('MODEL_PATH'),
-            "model_exists": model_exists,
-            "temp_dir_info": storage_info['temp_dir'],
-            "deepface_dir_info": storage_info['deepface_dir']
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        raise HTTPException(503, detail=f"Service unavailable: {str(e)}")
-
-@app.get("/storage")
-async def get_storage():
-    """Endpoint to get detailed storage information"""
-    try:
-        return JSONResponse(content=get_storage_info())
-    except Exception as e:
-        logger.error(f"Storage info failed: {e}")
-        raise HTTPException(500, detail=f"Could not get storage info: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
