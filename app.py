@@ -7,6 +7,10 @@ import numpy as np
 import cv2
 import imghdr
 from concurrent.futures import ThreadPoolExecutor
+import psutil
+import shutil
+from datetime import datetime
+from pathlib import Path
 
 # Configure environment before any imports
 os.environ.update({
@@ -35,7 +39,7 @@ tf.keras.mixed_precision.set_global_policy(policy)
 
 app = FastAPI(
     title="Deepfake Detection API",
-    description="API for detecting deepfake, real and AI-generated images (CPU Optimized)",
+    description="API for detecting deepfake, real and AI-generated images with storage monitoring",
     version="1.0",
     contact={
         "name": "API Support",
@@ -54,12 +58,21 @@ MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 10 * 1024 * 1024))
 MAX_WORKERS = int(os.getenv('MAX_WORKERS', 2))
 
 # Pydantic Models
+class StorageInfo(BaseModel):
+    path: str
+    size_mb: float
+    files: List[str]
+    directories: List[str]
+
 class PredictionResult(BaseModel):
     filename: str
     class_: str = Field(..., alias="class")
     confidence: float = Field(..., ge=0, le=1)
     probabilities: Dict[str, float]
     error: Optional[str] = None
+    storage_before: Optional[Dict] = Field(None, description="Storage usage before processing")
+    storage_after: Optional[Dict] = Field(None, description="Storage usage after processing")
+    storage_diff: Optional[Dict] = Field(None, description="Storage differences")
 
     class Config:
         allow_population_by_field_name = True
@@ -69,6 +82,81 @@ class HealthCheckResponse(BaseModel):
     model_loaded: bool
     model_path: Optional[str]
     model_exists: Optional[bool]
+    storage: Dict[str, Union[int, float, str]]
+    temp_dir_info: Optional[StorageInfo]
+    deepface_dir_info: Optional[StorageInfo]
+
+# Storage monitoring functions
+def scan_directory(path: str) -> StorageInfo:
+    """Scan a directory and return its contents and size"""
+    path_obj = Path(path)
+    if not path_obj.exists():
+        return StorageInfo(path=path, size_mb=0, files=[], directories=[])
+    
+    total_size = 0
+    files = []
+    directories = []
+    
+    for item in path_obj.rglob('*'):
+        try:
+            if item.is_file():
+                total_size += item.stat().st_size
+                files.append(str(item.relative_to(path_obj)))
+            elif item.is_dir():
+                directories.append(str(item.relative_to(path_obj)))
+        except Exception as e:
+            logger.warning(f"Could not scan {item}: {str(e)}")
+    
+    return StorageInfo(
+        path=path,
+        size_mb=round(total_size / (1024 * 1024), 2),
+        files=files,
+        directories=directories
+    )
+
+def get_storage_info() -> Dict:
+    """Get detailed storage information"""
+    partitions = []
+    for partition in psutil.disk_partitions():
+        try:
+            usage = psutil.disk_usage(partition.mountpoint)
+            partitions.append({
+                "device": partition.device,
+                "mountpoint": partition.mountpoint,
+                "total_gb": round(usage.total / (1024**3), 2),
+                "used_gb": round(usage.used / (1024**3), 2),
+                "free_gb": round(usage.free / (1024**3), 2),
+                "percent_used": usage.percent
+            })
+        except Exception as e:
+            logger.warning(f"Could not get partition info for {partition.mountpoint}: {str(e)}")
+    
+    return {
+        "partitions": partitions,
+        "timestamp": datetime.now().isoformat(),
+        "temp_dir": scan_directory('/tmp'),
+        "deepface_dir": scan_directory('/tmp/.deepface')
+    }
+
+def track_storage_changes(before: Dict, after: Dict) -> Dict:
+    """Calculate storage changes between two states"""
+    changes = {}
+    
+    # Track partition changes
+    for before_part, after_part in zip(before['partitions'], after['partitions']):
+        if before_part['mountpoint'] == after_part['mountpoint']:
+            changes[before_part['mountpoint']] = {
+                "used_diff_mb": round((after_part['used_gb'] - before_part['used_gb']) * 1024, 2),
+                "free_diff_mb": round((after_part['free_gb'] - before_part['free_gb']) * 1024, 2)
+            }
+    
+    # Track directory changes
+    for dir_type in ['temp_dir', 'deepface_dir']:
+        changes[f"{dir_type}_size_diff_mb"] = after[dir_type].size_mb - before[dir_type].size_mb
+        changes[f"{dir_type}_files_diff"] = len(after[dir_type].files) - len(before[dir_type].files)
+        changes[f"{dir_type}_dirs_diff"] = len(after[dir_type].directories) - len(before[dir_type].directories)
+    
+    return changes
 
 # Custom layers (must keep original implementation)
 class EfficientChannelAttention(layers.Layer):
@@ -156,47 +244,94 @@ class FixedHybridBlock(layers.Layer):
         })
         return config
 
-# Resource management functions
-def cleanup_tensors():
-    """Explicitly clear TensorFlow tensors and Keras backend"""
-    tf.keras.backend.clear_session()
-    if hasattr(app.state, 'temp_arrays'):
-        for arr in app.state.temp_arrays:
+# Resource management with enhanced storage tracking
+class ResourceTracker:
+    def __init__(self):
+        self.temp_files = []
+        self.temp_arrays = []
+        self.temp_dirs = []
+    
+    def add_temp_file(self, path):
+        self.temp_files.append(path)
+    
+    def add_temp_dir(self, path):
+        self.temp_dirs.append(path)
+    
+    def add_temp_array(self, arr):
+        self.temp_arrays.append(arr)
+    
+    def cleanup_tensors(self):
+        """Explicitly clear TensorFlow tensors and Keras backend"""
+        tf.keras.backend.clear_session()
+        for arr in self.temp_arrays:
             del arr
-        app.state.temp_arrays = []
-
-def cleanup_files():
-    """Clean up any temporary files"""
-    if hasattr(app.state, 'temp_files'):
-        for f in app.state.temp_files:
+        self.temp_arrays = []
+    
+    def cleanup_files(self):
+        """Clean up any temporary files with storage tracking"""
+        deleted_size = 0
+        for f in self.temp_files:
             try:
                 if os.path.exists(f):
+                    deleted_size += os.path.getsize(f)
                     os.unlink(f)
-            except:
-                pass
-        app.state.temp_files = []
-
-def cleanup_resources():
-    """Clean all temporary resources"""
-    cleanup_tensors()
-    cleanup_files()
-    if hasattr(app.state, 'last_images'):
-        del app.state.last_images
-    if hasattr(app.state, 'last_predictions'):
-        del app.state.last_predictions
+            except Exception as e:
+                logger.warning(f"Could not delete temp file {f}: {str(e)}")
+        self.temp_files = []
+        
+        for d in self.temp_dirs:
+            try:
+                if os.path.exists(d):
+                    deleted_size += sum(f.stat().st_size for f in Path(d).rglob('*') if f.is_file())
+                    shutil.rmtree(d)
+            except Exception as e:
+                logger.warning(f"Could not delete temp dir {d}: {str(e)}")
+        self.temp_dirs = []
+        
+        logger.info(f"Cleaned up {round(deleted_size / (1024 * 1024), 2)} MB of temporary files/dirs")
+    
+    def cleanup_deepface_cache(self):
+        """Clean DeepFace cache with storage tracking"""
+        cache_path = os.path.join(os.environ['DEEPFACE_HOME'], '.deepface')
+        if os.path.exists(cache_path):
+            before_size = sum(f.stat().st_size for f in Path(cache_path).rglob('*') if f.is_file()) / (1024 * 1024)
+            try:
+                shutil.rmtree(cache_path)
+                logger.info(f"Cleaned up DeepFace cache (freed {round(before_size, 2)} MB)")
+            except Exception as e:
+                logger.error(f"Error cleaning DeepFace cache: {str(e)}")
+    
+    def cleanup_all(self):
+        """Clean all temporary resources with storage tracking"""
+        before_storage = get_storage_info()
+        
+        self.cleanup_tensors()
+        self.cleanup_files()
+        self.cleanup_deepface_cache()
+        
+        after_storage = get_storage_info()
+        storage_changes = track_storage_changes(before_storage, after_storage)
+        
+        logger.info(f"Resource cleanup completed. Storage changes: {storage_changes}")
 
 # FaceCropper with resource management
 class FaceCropper:
     def __init__(self):
         logger.info("DeepFace detector initialized successfully.")
+        self.resource_tracker = ResourceTracker()
 
     def safe_crop(self, img_array: np.ndarray) -> np.ndarray:
         """Process image with cleanup"""
         try:
             img_rgb = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
             
+            # Create temp file for DeepFace processing
+            temp_file = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False).name
+            cv2.imwrite(temp_file, img_rgb)
+            self.resource_tracker.add_temp_file(temp_file)
+            
             faces = DeepFace.extract_faces(
-                img_path=img_rgb,
+                img_path=temp_file,
                 detector_backend='opencv',
                 enforce_detection=False,
                 align=False
@@ -233,14 +368,20 @@ def is_valid_image(file_bytes):
         return False
 
 # File processing with resource management
-def process_single_file(file: UploadFile):
-    """Process file with explicit cleanup"""
+def process_single_file(file: UploadFile, resource_tracker: ResourceTracker):
+    """Process file with explicit cleanup and storage monitoring"""
+    # Get initial storage state
+    initial_storage = get_storage_info()
+    
     result = {
         "filename": file.filename,
         "class": None,
         "confidence": None,
         "probabilities": None,
-        "error": None
+        "error": None,
+        "storage_before": initial_storage,
+        "storage_after": None,
+        "storage_diff": None
     }
     
     try:
@@ -262,24 +403,27 @@ def process_single_file(file: UploadFile):
         full_img = preprocess_image(img)
         face_img = app.state.cropper.safe_crop(img)
         
-        # Store temp arrays for later cleanup
-        if not hasattr(app.state, 'temp_arrays'):
-            app.state.temp_arrays = []
-        app.state.temp_arrays.extend([full_img, face_img])
+        # Track resources
+        resource_tracker.add_temp_array(full_img)
+        resource_tracker.add_temp_array(face_img)
         
-        # Predict with cleanup
+        # Predict
         prediction = app.state.model.predict([
             np.array([full_img]), 
             np.array([face_img])
         ], verbose=0)[0]
         
-        # Cleanup immediately
-        del full_img, face_img, img, nparr, file_bytes
+        # Get storage usage after processing
+        current_storage = get_storage_info()
+        storage_changes = track_storage_changes(initial_storage, current_storage)
         
+        # Update result with storage info
         result.update({
             "class": CLASS_NAMES[np.argmax(prediction)],
             "confidence": float(np.max(prediction)),
-            "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)}
+            "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)},
+            "storage_after": current_storage,
+            "storage_diff": storage_changes
         })
         
     except Exception as e:
@@ -317,10 +461,7 @@ async def startup_event():
         app.state.model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
         app.state.cropper = FaceCropper()
         app.state.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-        
-        # Initialize resource tracking
-        app.state.temp_files = []
-        app.state.temp_arrays = []
+        app.state.resource_tracker = ResourceTracker()
         
         # Warm up model
         dummy_input = [
@@ -330,13 +471,15 @@ async def startup_event():
         app.state.model.predict(dummy_input, steps=1)
         
         logger.info("Service initialized with resource tracking")
+        logger.info(f"Initial storage state: {get_storage_info()}")
     except Exception as e:
         logger.error(f"Startup failed: {str(e)}")
         raise RuntimeError(f"Initialization error: {str(e)}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    cleanup_resources()
+    if hasattr(app.state, 'resource_tracker'):
+        app.state.resource_tracker.cleanup_all()
     if hasattr(app.state, 'executor'):
         app.state.executor.shutdown(wait=False)
     logger.info("Service shutdown complete")
@@ -350,15 +493,22 @@ async def predict(files: List[UploadFile] = File(...)):
         return await asyncio.get_event_loop().run_in_executor(
             app.state.executor,
             process_single_file,
-            file
+            file,
+            app.state.resource_tracker
         )
     
     try:
+        # Cleanup before processing new batch
+        app.state.resource_tracker.cleanup_all()
+        
         results = await asyncio.gather(*(process_wrapper(f) for f in files))
-        cleanup_resources()  # Explicit cleanup after processing
+        
+        # Cleanup after processing
+        app.state.resource_tracker.cleanup_all()
+        
         return results
     except Exception as e:
-        cleanup_resources()  # Cleanup even on error
+        app.state.resource_tracker.cleanup_all()
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(500, "Processing failed")
 
@@ -366,15 +516,34 @@ async def predict(files: List[UploadFile] = File(...)):
 async def health_check():
     try:
         model_exists = os.path.exists(os.getenv('MODEL_PATH'))
+        storage_info = get_storage_info()
+        
         return {
             "status": "healthy",
             "model_loaded": hasattr(app.state, "model"),
             "model_path": os.getenv('MODEL_PATH'),
-            "model_exists": model_exists
+            "model_exists": model_exists,
+            "storage": {
+                "total_space_gb": sum(p['total_gb'] for p in storage_info['partitions']),
+                "used_space_gb": sum(p['used_gb'] for p in storage_info['partitions']),
+                "temp_dir_size_mb": storage_info['temp_dir'].size_mb,
+                "deepface_dir_size_mb": storage_info['deepface_dir'].size_mb
+            },
+            "temp_dir_info": storage_info['temp_dir'],
+            "deepface_dir_info": storage_info['deepface_dir']
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         raise HTTPException(503, detail=f"Service unavailable: {str(e)}")
+
+@app.get("/storage")
+async def get_storage():
+    """Endpoint to get detailed storage information"""
+    try:
+        return JSONResponse(content=get_storage_info())
+    except Exception as e:
+        logger.error(f"Storage info failed: {e}")
+        raise HTTPException(500, detail=f"Could not get storage info: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
