@@ -10,7 +10,7 @@ RUN mkdir -p /model && \
 FROM python:3.10-slim
 
 # Set environment variables
-ENV DEEPFACE_HOME=/app/.deepface \
+ENV DEEPFACE_HOME=/tmp/.deepface \
     CUDA_VISIBLE_DEVICES=-1 \
     TF_CPP_MIN_LOG_LEVEL=3 \
     TF_NUM_INTEROP_THREADS=2 \
@@ -20,9 +20,11 @@ ENV DEEPFACE_HOME=/app/.deepface \
     MAX_WORKERS=2 \
     MAX_FILE_SIZE=10485760
 
-# Copy pre-downloaded model and deepface assets
-COPY --from=downloader /model /app/model
-COPY .deepface_cache /app/.deepface
+# Create app directory
+RUN mkdir -p /app/model
+
+# Copy only the pre-downloaded model
+COPY --from=downloader /model/final_model_11_4_2025.keras /app/model/
 
 # Install runtime dependencies and clean cache
 RUN apt-get update && apt-get install -y --no-install-recommends \
