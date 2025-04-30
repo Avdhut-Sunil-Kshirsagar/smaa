@@ -37,7 +37,7 @@ model = tf.keras.models.load_model(
 
 # Warm up with proper dtype inputs
 dummy_input = [
-    np.zeros((1, 224, 224, 3), 
+    np.zeros((1, 224, 224, 3)), 
     np.zeros((1, 224, 224, 3))
 ]
 model.predict(dummy_input, verbose=0)
