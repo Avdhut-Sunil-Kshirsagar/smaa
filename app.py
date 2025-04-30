@@ -15,7 +15,7 @@ os.environ.update({
     'CUDA_VISIBLE_DEVICES': '-1',
     'TF_CPP_MIN_LOG_LEVEL': '2',
     'TF_ENABLE_ONEDNN_OPTS': '1',
-    'DEEPFACE_CACHE': '0'  # Disable DeepFace caching
+    'DEEPFACE_CACHE': '0'
 })
 
 # Configure logging
@@ -36,7 +36,7 @@ tf.keras.mixed_precision.set_global_policy(policy)
 
 app = FastAPI(
     title="Deepfake Detection API",
-    description="API with strict resource management for detecting deepfake images",
+    description="API for detecting deepfake images with strict resource management",
     version="1.0"
 )
 
@@ -54,7 +54,13 @@ class PredictionResult(BaseModel):
     probabilities: Dict[str, float]
     error: Optional[str] = None
 
-# Custom layers (unchanged from your working version)
+class HealthCheckResponse(BaseModel):
+    status: str
+    model_loaded: bool
+    model_path: Optional[str] = None
+    model_exists: bool
+
+# Custom Layers
 class EfficientChannelAttention(layers.Layer):
     def __init__(self, channels, reduction=8, **kwargs):
         super().__init__(**kwargs)
@@ -75,10 +81,7 @@ class EfficientChannelAttention(layers.Layer):
     
     def get_config(self):
         config = super().get_config()
-        config.update({
-            'channels': self.channels,
-            'reduction': self.reduction
-        })
+        config.update({'channels': self.channels, 'reduction': self.reduction})
         return config
 
 class FixedSpatialAttention(layers.Layer):
@@ -128,13 +131,11 @@ class FixedHybridBlock(layers.Layer):
     
     def get_config(self):
         config = super().get_config()
-        config.update({
-            'filters': self.filters
-        })
+        config.update({'filters': self.filters})
         return config
 
 class RequestResourceManager:
-    """Manages all resources for a single request"""
+    """Manages resources for a single request"""
     def __init__(self):
         self.temp_files = []
         self.temp_arrays = []
@@ -147,70 +148,44 @@ class RequestResourceManager:
         self.temp_arrays.append(arr)
     
     def cleanup(self):
-        """Ensure all resources are released"""
-        if self.cleanup_complete:
-            return
-            
-        # Clear TensorFlow session
+        if self.cleanup_complete: return
         tf.keras.backend.clear_session()
-        
-        # Delete numpy arrays
-        for arr in self.temp_arrays:
-            del arr
-        
-        # Remove temporary files
+        for arr in self.temp_arrays: del arr
         for f in self.temp_files:
-            try:
-                if os.path.exists(f):
-                    os.unlink(f)
-            except:
-                pass
-                
-        # Clear DeepFace cache
+            try: os.unlink(f) if os.path.exists(f) else None
+            except: pass
         cache_path = os.path.join(os.environ['DEEPFACE_HOME'], '.deepface')
         if os.path.exists(cache_path):
-            try:
-                shutil.rmtree(cache_path)
-            except:
-                pass
-                
+            try: shutil.rmtree(cache_path)
+            except: pass
         self.cleanup_complete = True
         logger.info("Request resources cleaned up")
 
 def is_valid_image(file_bytes):
-    """Validate image without creating temporary files"""
-    try:
-        if len(file_bytes) > MAX_FILE_SIZE:
-            return False
-        return imghdr.what(None, h=file_bytes) in ['jpeg', 'jpg', 'png']
-    except:
-        return False
+    """Validate image format"""
+    try: return imghdr.what(None, h=file_bytes) in ['jpeg', 'jpg', 'png']
+    except: return False
 
 def process_image_in_memory(file_bytes, resource_mgr):
-    """Process image entirely in memory"""
+    """Process image without disk I/O"""
     try:
-        # Convert bytes to numpy array
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img is None:
-            raise ValueError("Invalid image data")
+        if img is None: raise ValueError("Invalid image data")
         
-        # Preprocess full image
         full_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         full_img = full_img.astype(np.float32) / 255.0
         full_img = cv2.resize(full_img, TARGET_SIZE)
         
-        # Process face crop in memory
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         faces = DeepFace.extract_faces(
-            img_path=img_rgb,  # Pass array directly
+            img_path=img_rgb,
             detector_backend='opencv',
             enforce_detection=False,
             align=False
         )
         face_img = cv2.resize(faces[0]['face'] if faces else img, TARGET_SIZE)
         
-        # Track resources
         resource_mgr.add_temp_array(full_img)
         resource_mgr.add_temp_array(face_img)
         
@@ -223,17 +198,14 @@ def process_image_in_memory(file_bytes, resource_mgr):
 @app.on_event("startup")
 async def startup_event():
     try:
-        # Configure TensorFlow for minimal resource usage
         tf.config.optimizer.set_experimental_options({
             'constant_folding': True,
             'shape_optimization': True,
             'arithmetic_optimization': True,
         })
-        
         tf.config.threading.set_intra_op_parallelism_threads(1)
         tf.config.threading.set_inter_op_parallelism_threads(1)
         
-        # Load model with custom objects
         model_path = os.getenv('MODEL_PATH')
         custom_objects = {
             'EfficientChannelAttention': EfficientChannelAttention,
@@ -242,13 +214,12 @@ async def startup_event():
         }
         
         app.state.model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
+        app.state.model_path = model_path
         app.state.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
         
-        # Warm up model
         dummy_input = np.zeros((1, *TARGET_SIZE, 3))
         app.state.model.predict([dummy_input, dummy_input], steps=1)
-        
-        logger.info("Service initialized with strict resource management")
+        logger.info("Service initialized")
     except Exception as e:
         logger.error(f"Startup failed: {str(e)}")
         raise RuntimeError(f"Initialization error: {str(e)}")
@@ -260,35 +231,34 @@ async def shutdown_event():
     tf.keras.backend.clear_session()
     logger.info("Service shutdown complete")
 
+@app.get("/health", response_model=HealthCheckResponse)
+async def health_check():
+    model_loaded = hasattr(app.state, 'model') and app.state.model is not None
+    model_path = getattr(app.state, 'model_path', None)
+    model_exists = os.path.exists(model_path) if model_path else False
+    return {
+        "status": "healthy" if model_loaded else "unhealthy",
+        "model_loaded": model_loaded,
+        "model_path": model_path,
+        "model_exists": model_exists
+    }
+
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(files: List[UploadFile] = File(...)):
-    if len(files) > 10:
-        raise HTTPException(413, "Maximum 10 files allowed")
+    if len(files) > 10: raise HTTPException(413, "Maximum 10 files allowed")
     
     async def process_wrapper(file: UploadFile):
-        # Create resource manager for this request
         resource_mgr = RequestResourceManager()
-        result = {
-            "filename": file.filename,
-            "class": None,
-            "confidence": None,
-            "probabilities": None,
-            "error": None
-        }
-        
+        result = {"filename": file.filename, "class": None, 
+                 "confidence": None, "probabilities": None, "error": None}
         try:
-            # Read and validate
-            file_bytes = file.file.read(MAX_FILE_SIZE + 1)
+            file_bytes = await file.read()
             if len(file_bytes) > MAX_FILE_SIZE:
-                raise ValueError("File size exceeds limit")
-                
+                raise ValueError("File size exceeds 10MB limit")
             if not is_valid_image(file_bytes):
                 raise ValueError("Invalid image format")
             
-            # Process in memory
             full_img, face_img = process_image_in_memory(file_bytes, resource_mgr)
-            
-            # Predict
             prediction = app.state.model.predict([
                 np.array([full_img]), 
                 np.array([face_img])
@@ -299,19 +269,15 @@ async def predict(files: List[UploadFile] = File(...)):
                 "confidence": float(np.max(prediction)),
                 "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)}
             })
-            
         except Exception as e:
             result["error"] = str(e)
             logger.error(f"Error processing {file.filename}: {str(e)}")
         finally:
-            # Ensure cleanup happens even if error occurs
             resource_mgr.cleanup()
             del resource_mgr
-            
         return result
     
-    try:
-        return await asyncio.gather(*(process_wrapper(f) for f in files))
+    try: return await asyncio.gather(*(process_wrapper(f) for f in files))
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(500, "Processing failed")
