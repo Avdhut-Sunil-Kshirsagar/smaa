@@ -6,6 +6,7 @@ from tensorflow.keras.mixed_precision import Policy
 policy = Policy('mixed_float16')
 tf.keras.mixed_precision.set_global_policy(policy)
 
+
 class EfficientChannelAttention(layers.Layer):
     def __init__(self, channels, reduction=8, **kwargs):
         super().__init__(**kwargs)
