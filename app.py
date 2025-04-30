@@ -21,6 +21,10 @@ os.environ.update({
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+from tensorflow.keras.mixed_precision import Policy
+policy = Policy('mixed_float16')
+tf.keras.mixed_precision.set_global_policy(policy)
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import tensorflow as tf
