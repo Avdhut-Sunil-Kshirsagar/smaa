@@ -26,20 +26,18 @@ custom_objects = {
     'FixedHybridBlock': FixedHybridBlock
 }
 
-# Explicitly set mixed precision policy before loading
-policy = tf.keras.mixed_precision.Policy('mixed_float16')
-tf.keras.mixed_precision.set_global_policy(policy)
-
 model = tf.keras.models.load_model(
     os.environ['MODEL_PATH'],
     custom_objects=custom_objects
 )
 
-# Warm up with proper dtype inputs
+# Use proper input shapes matching your model architecture
 dummy_input = [
-    np.zeros((1, 224, 224, 3)), 
-    np.zeros((1, 224, 224, 3))
+    np.zeros((1, 224, 224, 3), dtype=np.float32),  # Full image input
+    np.zeros((1, 224, 224, 3), dtype=np.float32)   # Face crop input
 ]
+
+# Warm up model with proper input structure
 model.predict(dummy_input, verbose=0)
 
 print("All models preloaded successfully!")
