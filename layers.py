@@ -14,23 +14,20 @@ class EfficientChannelAttention(layers.Layer):
         self.avg_pool = layers.GlobalAveragePooling2D()
         self.max_pool = layers.GlobalMaxPooling2D()
         self.fc = models.Sequential([
-            layers.Dense(channels//reduction, activation='relu', dtype='float32'),
-            layers.Dense(channels, activation='sigmoid', dtype='float32')
+            layers.Dense(channels//reduction, activation='relu'),
+            layers.Dense(channels, activation='sigmoid')
         ])
         
     def call(self, x):
-        x = tf.cast(x, tf.float32)
         avg_out = self.fc(self.avg_pool(x))
         max_out = self.fc(self.max_pool(x))
         out = avg_out + max_out
-        out = tf.cast(out, policy.compute_dtype)
         return tf.reshape(out, [-1, 1, 1, self.channels]) * x
     
     def get_config(self):
-        return super().get_config().update({
-            'channels': self.channels,
-            'reduction': self.reduction
-        })
+        config = super().get_config()
+        config.update({'channels': self.channels, 'reduction': self.reduction})
+        return config
 
 class FixedSpatialAttention(layers.Layer):
     def __init__(self, **kwargs):
@@ -38,12 +35,11 @@ class FixedSpatialAttention(layers.Layer):
         self.conv = layers.Conv2D(1, 7, padding='same', activation='sigmoid')
         
     def call(self, inputs):
-        inputs = tf.cast(inputs, tf.float32)
         avg_out = tf.reduce_mean(inputs, axis=3, keepdims=True)
         max_out = tf.reduce_max(inputs, axis=3, keepdims=True)
         concat = tf.concat([avg_out, max_out], axis=3)
         attention = self.conv(concat)
-        return tf.cast(attention, policy.compute_dtype) * inputs
+        return attention * inputs
     
     def get_config(self):
         return super().get_config()
@@ -68,8 +64,7 @@ class FixedHybridBlock(layers.Layer):
     def call(self, inputs):
         residual = inputs
         if self.res_conv is not None:
-            residual = self.res_conv(residual)
-            
+            residual = self.res_conv(inputs)
         x = self.conv1(inputs)
         x = self.norm1(x)
         x = self.act(x)
@@ -77,13 +72,9 @@ class FixedHybridBlock(layers.Layer):
         x = self.sa(x)
         x = self.conv2(x)
         x = self.norm2(x)
-        
-        # Ensure matching dtypes before addition
-        x = tf.cast(x, residual.dtype)
         return self.act(x + residual)
     
-    def compute_output_shape(self, input_shape):
-        return input_shape
-    
     def get_config(self):
-        return super().get_config().update({'filters': self.filters})
+        config = super().get_config()
+        config.update({'filters': self.filters})
+        return config
