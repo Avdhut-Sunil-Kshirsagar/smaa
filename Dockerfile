@@ -10,7 +10,7 @@ RUN mkdir -p /model && \
 FROM python:3.10-slim
 
 # Set environment variables
-ENV DEEPFACE_HOME=/tmp/.deepface \
+ENV DEEPFACE_HOME=/app/.deepface \
     CUDA_VISIBLE_DEVICES=-1 \
     TF_CPP_MIN_LOG_LEVEL=3 \
     TF_NUM_INTEROP_THREADS=2 \
@@ -22,13 +22,14 @@ ENV DEEPFACE_HOME=/tmp/.deepface \
     PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1
 
-# Create app directory
-RUN mkdir -p /app/model
+# Create app directory structure
+RUN mkdir -p /app/model ${DEEPFACE_HOME} && \
+    chmod -R 755 /app
 
-# Copy only the pre-downloaded model
+# Copy pre-downloaded model
 COPY --from=downloader /model/final_model_11_4_2025.keras /app/model/
 
-# Install minimal runtime dependencies
+# Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-glx \
     libglib2.0-0 \
@@ -36,29 +37,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -U pip setuptools wheel
 
-# Copy requirements and install with dependency resolution
+# Copy and install requirements
 COPY requirements.txt .
 RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
-    && rm requirements.txt \
-    && find /opt/venv -type d -name '__pycache__' -exec rm -rf {} + \
-    && find /opt/venv -name '*.pyc' -delete
+    && rm requirements.txt
+
+# Pre-download DeepFace models during build
+COPY preload_models.py .
+RUN /opt/venv/bin/python preload_models.py && \
+    rm preload_models.py && \
+    chmod -R 755 ${DEEPFACE_HOME}
 
 # Copy application code
 COPY app.py .
 
-# Clean up unnecessary files
+# Cleanup
 RUN apt-get purge -y --auto-remove \
     && rm -rf /root/.cache /tmp/*
 
-# Create non-root user with UID in 10000-20000 range
+# Non-root user setup
 RUN useradd -mU -u 15000 appuser \
-    && chown -R appuser:appuser /app \
-    && chmod -R 755 /app
+    && chown -R appuser:appuser /app ${DEEPFACE_HOME}
 
 USER 15000
 
 EXPOSE 8000
 
-# Start command with memory limits
 CMD ["/opt/venv/bin/uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", \
      "--workers", "1", "--limit-concurrency", "4", "--timeout-keep-alive", "60"]
