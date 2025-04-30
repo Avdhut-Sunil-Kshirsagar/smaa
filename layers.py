@@ -49,4 +49,27 @@ class FixedHybridBlock(layers.Layer):
         self.sa = FixedSpatialAttention()
         self.norm1 = layers.BatchNormalization()
         self.norm2 = layers.BatchNormalization()
-        self.act =
+        self.act = layers.Activation('swish')
+        self.res_conv = None
+
+    def build(self, input_shape):
+        if input_shape[-1] != self.filters:
+            self.res_conv = layers.Conv2D(self.filters, 1)
+
+    def call(self, inputs):
+        residual = inputs
+        if self.res_conv is not None:
+            residual = self.res_conv(inputs)
+        x = self.conv1(inputs)
+        x = self.norm1(x)
+        x = self.act(x)
+        x = self.eca(x)
+        x = self.sa(x)
+        x = self.conv2(x)
+        x = self.norm2(x)
+        return self.act(x + residual)
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({'filters': self.filters})
+        return config
