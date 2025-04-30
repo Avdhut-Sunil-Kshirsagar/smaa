@@ -42,10 +42,13 @@ COPY requirements.txt .
 RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
     && rm requirements.txt
 
-# Pre-download DeepFace models during build
+# Copy layer definitions and preload script
+COPY layers.py .
 COPY preload_models.py .
+
+# Pre-download models with layer definitions
 RUN /opt/venv/bin/python preload_models.py && \
-    rm preload_models.py && \
+    rm preload_models.py layers.py && \
     chmod -R 755 ${DEEPFACE_HOME}
 
 # Copy application code
