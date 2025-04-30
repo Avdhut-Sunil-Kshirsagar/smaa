@@ -51,8 +51,7 @@ COPY layers.py .
 COPY preload_models.py .
 
 # Set mixed precision policy and preload models
-RUN /opt/venv/bin/python -c "import tensorflow as tf; from tensorflow.keras.mixed_precision import Policy; tf.keras.mixed_precision.set_global_policy(Policy('mixed_float16'))" && \
-    /opt/venv/bin/python preload_models.py && \
+RUN /opt/venv/bin/python preload_models.py && \
     rm preload_models.py layers.py && \
     chmod -R 755 ${DEEPFACE_HOME}
 
