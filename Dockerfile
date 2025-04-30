@@ -43,12 +43,12 @@ RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
     && rm requirements.txt
 
 # Copy layer definitions and preload script
-COPY layers.py .
+COPY layers_helper.py .
 COPY preload_models.py .
 
 # Preload models with correct layer definitions
 RUN /opt/venv/bin/python preload_models.py && \
-    rm preload_models.py layers.py && \
+    rm preload_models.py layers_helper.py && \
     chmod -R 755 ${DEEPFACE_HOME}
 
 # Copy application code
