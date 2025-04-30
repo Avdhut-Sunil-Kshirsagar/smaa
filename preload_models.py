@@ -26,11 +26,20 @@ custom_objects = {
     'FixedHybridBlock': FixedHybridBlock
 }
 
+# Explicitly set mixed precision policy before loading
+policy = tf.keras.mixed_precision.Policy('mixed_float16')
+tf.keras.mixed_precision.set_global_policy(policy)
+
 model = tf.keras.models.load_model(
     os.environ['MODEL_PATH'],
     custom_objects=custom_objects
 )
-dummy_input = [np.zeros((1, 224, 224, 3)), np.zeros((1, 224, 224, 3))]
+
+# Warm up with proper dtype inputs
+dummy_input = [
+    np.zeros((1, 224, 224, 3), 
+    np.zeros((1, 224, 224, 3))
+]
 model.predict(dummy_input, verbose=0)
 
 print("All models preloaded successfully!")
