@@ -20,7 +20,11 @@ ENV DEEPFACE_HOME=/app/.deepface \
     MAX_WORKERS=2 \
     MAX_FILE_SIZE=10485760 \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    TF_ENABLE_AUTO_MIXED_PRECISION=1 \
+    TF_MIXED_PRECISION_GRAPH_REWRITE_DENYLIST_REMOVE="" \
+    TF_MIXED_PRECISION_GRAPH_REWRITE_INFERLIST_REMOVE="" \
+    TF_MIXED_PRECISION_GRAPH_REWRITE_ALLOWLIST_ADD=""
 
 # Create app directory structure
 RUN mkdir -p /app/model ${DEEPFACE_HOME} && \
@@ -46,8 +50,9 @@ RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
 COPY layers.py .
 COPY preload_models.py .
 
-# Pre-download models with layer definitions
-RUN /opt/venv/bin/python preload_models.py && \
+# Set mixed precision policy and preload models
+RUN /opt/venv/bin/python -c "import tensorflow as tf; from tensorflow.keras.mixed_precision import Policy; tf.keras.mixed_precision.set_global_policy(Policy('mixed_float16'))" && \
+    /opt/venv/bin/python preload_models.py && \
     rm preload_models.py layers.py && \
     chmod -R 755 ${DEEPFACE_HOME}
 
