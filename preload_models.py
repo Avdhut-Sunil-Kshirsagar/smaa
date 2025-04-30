@@ -24,4 +24,4 @@ model = tf.keras.models.load_model(os.environ['MODEL_PATH'], custom_objects=cust
 dummy_input = [np.zeros((1, 224, 224, 3)), np.zeros((1, 224, 224, 3))]
 model.predict(dummy_input, verbose=0)
 
-print("All models preloaded successfully!")preload_models.py
+print("All models preloaded successfully!")
