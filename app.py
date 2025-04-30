@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 import tensorflow as tf
 from deepface import DeepFace
 from pydantic import BaseModel, Field
-from layers import (
+from layers_helper import (
     EfficientChannelAttention,
     FixedSpatialAttention,
     FixedHybridBlock
