@@ -2,7 +2,7 @@ import os
 import numpy as np
 import tensorflow as tf
 from deepface import DeepFace
-from layers import (
+from layers_helper import (
     EfficientChannelAttention,
     FixedSpatialAttention,
     FixedHybridBlock
