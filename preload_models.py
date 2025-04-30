@@ -2,6 +2,11 @@ import os
 import numpy as np
 import tensorflow as tf
 from deepface import DeepFace
+from layers import (
+    EfficientChannelAttention,
+    FixedSpatialAttention,
+    FixedHybridBlock
+)
 
 # Initialize DeepFace models
 print("Preloading DeepFace models...")
@@ -16,11 +21,15 @@ DeepFace.extract_faces(
 # Load and warm up main model
 print("Preloading main classification model...")
 custom_objects = {
-    'EfficientChannelAttention': lambda **kwargs: None,
-    'FixedSpatialAttention': lambda **kwargs: None,
-    'FixedHybridBlock': lambda **kwargs: None
+    'EfficientChannelAttention': EfficientChannelAttention,
+    'FixedSpatialAttention': FixedSpatialAttention,
+    'FixedHybridBlock': FixedHybridBlock
 }
-model = tf.keras.models.load_model(os.environ['MODEL_PATH'], custom_objects=custom_objects)
+
+model = tf.keras.models.load_model(
+    os.environ['MODEL_PATH'],
+    custom_objects=custom_objects
+)
 dummy_input = [np.zeros((1, 224, 224, 3)), np.zeros((1, 224, 224, 3))]
 model.predict(dummy_input, verbose=0)
 
