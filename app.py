@@ -7,11 +7,10 @@ import cv2
 import imghdr
 from concurrent.futures import ThreadPoolExecutor
 import shutil
-from pathlib import Path
 
 # Configure environment before any imports
 os.environ.update({
-    'DEEPFACE_HOME': '/tmp/.deepface',
+    'DEEPFACE_HOME': '/app/.deepface',
     'CUDA_VISIBLE_DEVICES': '-1',
     'TF_CPP_MIN_LOG_LEVEL': '2',
     'TF_ENABLE_ONEDNN_OPTS': '1',
@@ -30,13 +29,9 @@ from deepface import DeepFace
 from typing import List, Dict, Optional
 from pydantic import BaseModel, Field
 
-# Set mixed precision policy
-policy = tf.keras.mixed_precision.Policy('mixed_float16')
-tf.keras.mixed_precision.set_global_policy(policy)
-
 app = FastAPI(
     title="Deepfake Detection API",
-    description="API for detecting deepfake images with strict resource management",
+    description="API for detecting deepfake images with build-time initialization",
     version="1.0"
 )
 
@@ -60,7 +55,7 @@ class HealthCheckResponse(BaseModel):
     model_path: Optional[str] = None
     model_exists: bool
 
-# Custom Layers
+# Custom Layers (Must match training implementation)
 class EfficientChannelAttention(layers.Layer):
     def __init__(self, channels, reduction=8, **kwargs):
         super().__init__(**kwargs)
@@ -80,9 +75,10 @@ class EfficientChannelAttention(layers.Layer):
         return tf.reshape(out, [-1, 1, 1, self.channels]) * x
     
     def get_config(self):
-        config = super().get_config()
-        config.update({'channels': self.channels, 'reduction': self.reduction})
-        return config
+        return super().get_config().update({
+            'channels': self.channels,
+            'reduction': self.reduction
+        })
 
 class FixedSpatialAttention(layers.Layer):
     def __init__(self, **kwargs):
@@ -93,8 +89,7 @@ class FixedSpatialAttention(layers.Layer):
         avg_out = tf.reduce_mean(inputs, axis=3, keepdims=True)
         max_out = tf.reduce_max(inputs, axis=3, keepdims=True)
         concat = tf.concat([avg_out, max_out], axis=3)
-        attention = self.conv(concat)
-        return attention * inputs
+        return self.conv(concat) * inputs
     
     def get_config(self):
         return super().get_config()
@@ -117,9 +112,7 @@ class FixedHybridBlock(layers.Layer):
             self.res_conv = layers.Conv2D(self.filters, 1)
 
     def call(self, inputs):
-        residual = inputs
-        if self.res_conv is not None:
-            residual = self.res_conv(inputs)
+        residual = self.res_conv(inputs) if self.res_conv else inputs
         x = self.conv1(inputs)
         x = self.norm1(x)
         x = self.act(x)
@@ -130,36 +123,20 @@ class FixedHybridBlock(layers.Layer):
         return self.act(x + residual)
     
     def get_config(self):
-        config = super().get_config()
-        config.update({'filters': self.filters})
-        return config
+        return super().get_config().update({'filters': self.filters})
 
 class RequestResourceManager:
     """Manages resources for a single request"""
     def __init__(self):
-        self.temp_files = []
         self.temp_arrays = []
-        self.cleanup_complete = False
-    
-    def add_temp_file(self, path):
-        self.temp_files.append(path)
     
     def add_temp_array(self, arr):
         self.temp_arrays.append(arr)
     
     def cleanup(self):
-        if self.cleanup_complete: return
         tf.keras.backend.clear_session()
         for arr in self.temp_arrays: del arr
-        for f in self.temp_files:
-            try: os.unlink(f) if os.path.exists(f) else None
-            except: pass
-        cache_path = os.path.join(os.environ['DEEPFACE_HOME'], '.deepface')
-        if os.path.exists(cache_path):
-            try: shutil.rmtree(cache_path)
-            except: pass
-        self.cleanup_complete = True
-        logger.info("Request resources cleaned up")
+        self.temp_arrays.clear()
 
 def is_valid_image(file_bytes):
     """Validate image format"""
@@ -198,6 +175,7 @@ def process_image_in_memory(file_bytes, resource_mgr):
 @app.on_event("startup")
 async def startup_event():
     try:
+        # Configure TensorFlow
         tf.config.optimizer.set_experimental_options({
             'constant_folding': True,
             'shape_optimization': True,
@@ -206,23 +184,28 @@ async def startup_event():
         tf.config.threading.set_intra_op_parallelism_threads(1)
         tf.config.threading.set_inter_op_parallelism_threads(1)
         
-        model_path = os.getenv('MODEL_PATH')
+        # Load main model
         custom_objects = {
             'EfficientChannelAttention': EfficientChannelAttention,
             'FixedSpatialAttention': FixedSpatialAttention,
             'FixedHybridBlock': FixedHybridBlock
         }
+        app.state.model = tf.keras.models.load_model(
+            os.environ['MODEL_PATH'],
+            custom_objects=custom_objects
+        )
         
-        app.state.model = tf.keras.models.load_model(model_path, custom_objects=custom_objects)
-        app.state.model_path = model_path
-        app.state.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        # Warm up model
+        dummy_input = [np.zeros((1, *TARGET_SIZE, 3)), np.zeros((1, *TARGET_SIZE, 3))]
+        app.state.model.predict(dummy_input, steps=1, verbose=0)
         
-        dummy_input = np.zeros((1, *TARGET_SIZE, 3))
-        app.state.model.predict([dummy_input, dummy_input], steps=1)
-        logger.info("Service initialized")
+        # Initialize thread pool
+        app.state.executor = ThreadPoolExecutor(max_workers=int(os.environ['MAX_WORKERS']))
+        
+        logger.info("Service initialized and ready")
     except Exception as e:
         logger.error(f"Startup failed: {str(e)}")
-        raise RuntimeError(f"Initialization error: {str(e)}")
+        sys.exit(1)
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -234,13 +217,12 @@ async def shutdown_event():
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     model_loaded = hasattr(app.state, 'model') and app.state.model is not None
-    model_path = getattr(app.state, 'model_path', None)
-    model_exists = os.path.exists(model_path) if model_path else False
+    model_path = os.environ.get('MODEL_PATH')
     return {
         "status": "healthy" if model_loaded else "unhealthy",
         "model_loaded": model_loaded,
         "model_path": model_path,
-        "model_exists": model_exists
+        "model_exists": os.path.exists(model_path) if model_path else False
     }
 
 @app.post("/predict", response_model=List[PredictionResult])
@@ -252,18 +234,25 @@ async def predict(files: List[UploadFile] = File(...)):
         result = {"filename": file.filename, "class": None, 
                  "confidence": None, "probabilities": None, "error": None}
         try:
+            # Validate input
             file_bytes = await file.read()
-            if len(file_bytes) > MAX_FILE_SIZE:
-                raise ValueError("File size exceeds 10MB limit")
+            if len(file_bytes) > int(os.environ['MAX_FILE_SIZE']):
+                raise ValueError("File size exceeds limit")
             if not is_valid_image(file_bytes):
                 raise ValueError("Invalid image format")
             
+            # Process image
             full_img, face_img = process_image_in_memory(file_bytes, resource_mgr)
-            prediction = app.state.model.predict([
-                np.array([full_img]), 
-                np.array([face_img])
-            ], verbose=0)[0]
             
+            # Predict
+            prediction = await asyncio.get_event_loop().run_in_executor(
+                app.state.executor,
+                lambda: app.state.model.predict(
+                    [np.array([full_img]), np.array([face_img])],
+                    verbose=0
+                )[0]
+            
+            # Format results
             result.update({
                 "class": CLASS_NAMES[np.argmax(prediction)],
                 "confidence": float(np.max(prediction)),
@@ -274,13 +263,9 @@ async def predict(files: List[UploadFile] = File(...)):
             logger.error(f"Error processing {file.filename}: {str(e)}")
         finally:
             resource_mgr.cleanup()
-            del resource_mgr
         return result
     
-    try: return await asyncio.gather(*(process_wrapper(f) for f in files))
-    except Exception as e:
-        logger.error(f"Prediction error: {str(e)}")
-        raise HTTPException(500, "Processing failed")
+    return await asyncio.gather(*(process_wrapper(f) for f in files))
 
 if __name__ == "__main__":
     import uvicorn
