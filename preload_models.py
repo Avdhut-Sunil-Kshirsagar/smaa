@@ -8,6 +8,10 @@ from layers import (
     FixedHybridBlock
 )
 
+# Set mixed precision policy first
+policy = tf.keras.mixed_precision.Policy('mixed_float16')
+tf.keras.mixed_precision.set_global_policy(policy)
+
 # Initialize DeepFace models
 print("Preloading DeepFace models...")
 dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
@@ -31,13 +35,11 @@ model = tf.keras.models.load_model(
     custom_objects=custom_objects
 )
 
-# Use proper input shapes matching your model architecture
+# Create proper dummy input matching model architecture
 dummy_input = [
-    np.zeros((1, 224, 224, 3), dtype=np.float32),  # Full image input
-    np.zeros((1, 224, 224, 3), dtype=np.float32)   # Face crop input
+    np.zeros((1, 224, 224, 3)),  # Full image input
+    np.zeros((1, 224, 224, 3))   # Face image input
 ]
-
-# Warm up model with proper input structure
 model.predict(dummy_input, verbose=0)
 
 print("All models preloaded successfully!")
