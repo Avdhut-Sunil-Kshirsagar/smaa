@@ -6,7 +6,6 @@ import numpy as np
 import cv2
 import imghdr
 import shutil
-import psutil
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
@@ -27,6 +26,11 @@ os.environ.update({
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Set mixed precision policy (must keep as-is)
+policy = tf.keras.mixed_precision.Policy('mixed_float16')
+tf.keras.mixed_precision.set_global_policy(policy)
+
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import tensorflow as tf
@@ -40,10 +44,6 @@ from layers_helper import (
 
 # Disable TensorFlow warnings
 tf.get_logger().setLevel('ERROR')
-
-# Set mixed precision policy
-policy = tf.keras.mixed_precision.Policy('mixed_float16')
-tf.keras.mixed_precision.set_global_policy(policy)
 
 app = FastAPI(
     title="Deepfake Detection API",
@@ -74,7 +74,7 @@ class HealthCheckResponse(BaseModel):
     model_loaded: bool
     model_path: Optional[str] = None
     model_exists: bool
-    system_resources: Dict[str, float]
+    system_info: Dict[str, str]
 
 class RequestResourceManager:
     """Manages resources for a single request"""
@@ -108,12 +108,14 @@ def get_disk_usage(path: str) -> int:
     except:
         return 0
 
-def get_system_resources() -> Dict[str, float]:
-    """Get current system resource usage"""
+def get_system_info() -> Dict[str, str]:
+    """Get basic system information without psutil"""
     return {
-        "cpu_percent": psutil.cpu_percent(),
-        "memory_percent": psutil.virtual_memory().percent,
-        "disk_percent": psutil.disk_usage('/').percent
+        "cpu_count": str(os.cpu_count()),
+        "total_memory": "Not available",
+        "disk_usage": "Not available",
+        "python_version": sys.version,
+        "platform": sys.platform
     }
 
 def is_valid_image(file_bytes) -> bool:
@@ -240,7 +242,7 @@ async def health_check():
         "model_loaded": model_loaded,
         "model_path": model_path,
         "model_exists": os.path.exists(model_path) if model_path else False,
-        "system_resources": get_system_resources()
+        "system_info": get_system_info()
     }
 
 @app.post("/predict", response_model=List[PredictionResult])
