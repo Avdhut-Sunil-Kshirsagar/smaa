@@ -202,7 +202,6 @@ async def startup_event():
         
         # Disable training mode
         app.state.model.trainable = False
-        tf.keras.backend.set_learning_phase(0)
         
         # Warm up model with correct input shape
         dummy_input = [
