@@ -48,7 +48,7 @@ COPY preload_models.py .
 
 # Preload models with correct layer definitions
 RUN /opt/venv/bin/python preload_models.py && \
-    rm preload_models.py layers_helper.py && \
+    rm preload_models.py && \
     chmod -R 755 ${DEEPFACE_HOME}
 
 # Copy application code
