@@ -5,7 +5,6 @@ import logging
 import numpy as np
 import cv2
 import imghdr
-import shutil
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
@@ -26,7 +25,6 @@ os.environ.update({
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import tensorflow as tf
@@ -44,7 +42,7 @@ tf.get_logger().setLevel('ERROR')
 app = FastAPI(
     title="Deepfake Detection API",
     description="Optimized API for detecting deepfake images on CPU",
-    version="2.0"
+    version="2.1"
 )
 
 # Constants
@@ -105,13 +103,11 @@ def get_disk_usage(path: str) -> int:
         return 0
 
 def get_system_info() -> Dict[str, str]:
-    """Get basic system information without psutil"""
+    """Get basic system information"""
     return {
         "cpu_count": str(os.cpu_count()),
-        "total_memory": "Not available",
-        "disk_usage": "Not available",
-        "python_version": sys.version,
-        "platform": sys.platform
+        "platform": sys.platform,
+        "python_version": sys.version.split()[0]
     }
 
 def is_valid_image(file_bytes) -> bool:
@@ -121,42 +117,77 @@ def is_valid_image(file_bytes) -> bool:
     except: 
         return False
 
-def preprocess_image(img: np.ndarray) -> np.ndarray:
-    """Optimized image preprocessing pipeline"""
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = img.astype(np.float32) * (1./255.0)  # Faster than division
-    img = cv2.resize(img, TARGET_SIZE, interpolation=cv2.INTER_AREA)  # Faster interpolation
+def ensure_uint8(img: np.ndarray) -> np.ndarray:
+    """Ensure image is in uint8 format"""
+    if img.dtype != np.uint8:
+        if img.dtype == np.float64:
+            img = (img * 255).astype(np.uint8)
+        else:
+            img = img.astype(np.uint8)
     return img
 
-def extract_face(img: np.ndarray) -> np.ndarray:
-    """Optimized face extraction"""
+def preprocess_image(img: np.ndarray) -> np.ndarray:
+    """Optimized image preprocessing pipeline"""
     try:
+        # Ensure proper image format
+        img = ensure_uint8(img)
+        
+        # Convert color space and resize
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = img.astype(np.float32) * (1./255.0)
+        img = cv2.resize(img, TARGET_SIZE, interpolation=cv2.INTER_AREA)
+        return img
+    except Exception as e:
+        logger.error(f"Preprocessing error: {str(e)}")
+        raise ValueError("Image preprocessing failed")
+
+def extract_face(img: np.ndarray) -> np.ndarray:
+    """Optimized and robust face extraction"""
+    try:
+        # Ensure proper image format for DeepFace
+        img_rgb = cv2.cvtColor(ensure_uint8(img), cv2.COLOR_BGR2RGB)
+        
         faces = DeepFace.extract_faces(
-            img_path=img,
+            img_path=img_rgb,
             detector_backend='opencv',
             enforce_detection=False,
             align=False,
             grayscale=False
         )
-        return faces[0]['face'] if faces else img
-    except:
+        
+        if faces and 'face' in faces[0]:
+            face_img = faces[0]['face']
+            # Ensure face image is in correct format
+            if isinstance(face_img, np.ndarray):
+                return face_img
+        return img
+    except Exception as e:
+        logger.warning(f"Face extraction failed, using full image: {str(e)}")
         return img
 
 def process_image_in_memory(file_bytes: bytes, resource_mgr: RequestResourceManager) -> Tuple[np.ndarray, np.ndarray]:
-    """Process image without disk I/O with optimizations"""
+    """Process image with robust error handling"""
     try:
-        # Decode image with optimized parameters
+        # Decode image
         nparr = np.frombuffer(file_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
             raise ValueError("Invalid image data")
         
-        # Process full image
-        full_img = preprocess_image(img)
+        # Process full image with error handling
+        try:
+            full_img = preprocess_image(img)
+        except Exception as e:
+            logger.error(f"Full image processing failed: {str(e)}")
+            raise ValueError("Full image processing failed")
         
-        # Extract and process face
-        face_img = extract_face(img)
-        face_img = preprocess_image(face_img)
+        # Process face image with fallback
+        try:
+            face_img = extract_face(img)
+            face_img = preprocess_image(face_img)
+        except Exception as e:
+            logger.warning(f"Face processing failed, using full image: {str(e)}")
+            face_img = full_img.copy()
         
         resource_mgr.add_temp_array(full_img)
         resource_mgr.add_temp_array(face_img)
@@ -255,11 +286,12 @@ async def predict(files: List[UploadFile] = File(...)):
             "tmp": get_disk_usage("/tmp")
         }
         
+        # Initialize result with default values
         result = {
             "filename": file.filename,
-            "class": None,
-            "confidence": None,
-            "probabilities": None,
+            "class": "UNKNOWN",
+            "confidence": 0.0,
+            "probabilities": {name: 0.0 for name in CLASS_NAMES},
             "error": None,
             "disk_usage_before": disk_before,
             "disk_usage_after": {},
@@ -288,15 +320,24 @@ async def predict(files: List[UploadFile] = File(...)):
                 )[0]
             )
             
-            # Format results
-            result.update({
-                "class": CLASS_NAMES[np.argmax(prediction)],
-                "confidence": float(np.max(prediction)),
-                "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)}
-            })
+            # Ensure prediction is valid
+            if prediction is not None and len(prediction) == len(CLASS_NAMES):
+                # Format results
+                result.update({
+                    "class": CLASS_NAMES[np.argmax(prediction)],
+                    "confidence": float(np.max(prediction)),
+                    "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)}
+                })
+            else:
+                raise ValueError("Invalid prediction result from model")
             
         except Exception as e:
-            result["error"] = str(e)
+            result.update({
+                "error": str(e),
+                "class": "ERROR",
+                "confidence": 0.0,
+                "probabilities": {name: 0.0 for name in CLASS_NAMES}
+            })
             logger.error(f"Error processing {file.filename}: {str(e)}", exc_info=True)
             
         finally:
@@ -315,7 +356,7 @@ async def predict(files: List[UploadFile] = File(...)):
             
         return result
     
-    # Process files sequentially to avoid memory spikes (but using async for each)
+    # Process files sequentially to avoid memory spikes
     results = []
     for file in files:
         results.append(await process_wrapper(file))
