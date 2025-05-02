@@ -299,7 +299,6 @@ async def health_check():
     directories = {
         "temp": scan_directory("/temp"),
         "app": scan_directory("/app"),
-        "current": scan_directory("./"),
     }
     
     return {
