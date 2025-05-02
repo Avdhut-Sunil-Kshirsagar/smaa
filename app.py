@@ -130,8 +130,8 @@ def extract_face(img: np.ndarray) -> np.ndarray:
             img_path=img_rgb,
             detector_backend='opencv',
             enforce_detection=False,
-            align=False,
-            grayscale=False
+            #align=False,
+            #grayscale=False
         )
         
         if faces and 'face' in faces[0]:
