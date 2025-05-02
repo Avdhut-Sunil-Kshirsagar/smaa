@@ -64,6 +64,9 @@ class HealthCheckResponse(BaseModel):
     status: str
     model_loaded: bool
     directories: Dict[str, Dict]
+    current_app_directory: str
+    current_working_directory: str
+    
     
 class RequestResourceManager:
     """Manages resources for a single request"""
