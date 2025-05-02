@@ -60,11 +60,11 @@ class PredictionResult(BaseModel):
     probabilities: Dict[str, float]
     error: Optional[str] = None
 
+# Update the HealthCheckResponse model
 class HealthCheckResponse(BaseModel):
     status: str
     model_loaded: bool
     directories: Dict[str, Dict]
-    current_directory: Dict 
     
     
 class RequestResourceManager:
@@ -243,12 +243,9 @@ async def shutdown_event():
 
 
 
-
-def scan_directory(path: str, exclude_files: list = None) -> Dict:
+# Add this new function to scan directories
+def scan_directory(path: str) -> Dict:
     """Recursively scan directory and return structure with sizes"""
-    if exclude_files is None:
-        exclude_files = []
-    
     path = Path(path)
     if not path.exists():
         return {"error": f"Path {path} does not exist"}
@@ -263,17 +260,13 @@ def scan_directory(path: str, exclude_files: list = None) -> Dict:
     try:
         total_size = 0
         for item in path.iterdir():
-            # Skip excluded files
-            if item.name in exclude_files:
-                continue
-                
             item_info = {
                 "name": item.name,
                 "path": str(item)
             }
             
             if item.is_dir():
-                subdir = scan_directory(str(item), exclude_files)
+                subdir = scan_directory(str(item))
                 item_info.update({
                     "type": "directory",
                     "size_mb": subdir["size_mb"],
@@ -297,30 +290,24 @@ def scan_directory(path: str, exclude_files: list = None) -> Dict:
     return result
 
 
-
+# Update the health check endpoint
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     model_loaded = hasattr(app.state, 'model') and app.state.model is not None
     
-    # Get current working directory
-    current_dir = os.getcwd()
-    
-    # Scan important directories (excluding app.py in current directory)
+    # Scan important directories
     directories = {
         "temp": scan_directory("/temp"),
         "app": scan_directory("/app"),
-        "deepface_home": scan_directory(os.environ.get('DEEPFACE_HOME', '/app/.deepface'))
+        "current": scan_directory("./"),
     }
-    
-    # Scan current directory excluding app.py
-    current_directory = scan_directory(current_dir)
     
     return {
         "status": "healthy" if model_loaded else "unhealthy",
         "model_loaded": model_loaded,
-        "directories": directories,
-        "current_directory": current_directory  # Add current directory info
-    } 
+        "directories": directories
+    }
+
 
 
 @app.post("/predict", response_model=List[PredictionResult])
