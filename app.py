@@ -59,14 +59,16 @@ class PredictionResult(BaseModel):
     confidence: float
     probabilities: Dict[str, float]
     error: Optional[str] = None
+    # --- OPTIONAL MEMORY TRACKING START ---
+    disk_usage_before: Optional[Dict[str, float]] = None  # MB
+    disk_usage_after: Optional[Dict[str, float]] = None   # MB
+    temp_files_created: Optional[List[str]] = None
+    # --- OPTIONAL MEMORY TRACKING END ---
 
-# Update the HealthCheckResponse model
 class HealthCheckResponse(BaseModel):
     status: str
     model_loaded: bool
-    directories: Dict[str, Dict]
-    
-    
+
 class RequestResourceManager:
     """Manages resources for a single request"""
     def __init__(self):
@@ -91,6 +93,42 @@ class RequestResourceManager:
                 pass
         self.temp_arrays.clear()
         self.temp_files.clear()
+
+# --- OPTIONAL MEMORY TRACKING UTILITIES START ---
+def get_directory_size(path: str) -> float:
+    """Get directory size in MB"""
+    try:
+        if not os.path.exists(path):
+            return 0.0
+        total = 0
+        for entry in os.scandir(path):
+            if entry.is_file():
+                total += entry.stat().st_size
+            elif entry.is_dir():
+                total += get_directory_size(entry.path)
+        return round(total / (1024 * 1024), 2)  # Convert to MB
+    except:
+        return 0.0
+
+def scan_temp_files() -> List[str]:
+    """Scan for temporary files created during processing"""
+    temp_dirs = ['/tmp', '/app/tmp', os.environ.get('DEEPFACE_HOME', '')]
+    temp_files = []
+    for temp_dir in temp_dirs:
+        if temp_dir and os.path.exists(temp_dir):
+            for root, _, files in os.walk(temp_dir):
+                for file in files:
+                    temp_files.append(os.path.join(root, file))
+    return temp_files
+
+def get_disk_usage() -> Dict[str, float]:
+    """Get disk usage for key directories in MB"""
+    return {
+        'app': get_directory_size('/app'),
+        'tmp': get_directory_size('/tmp'),
+        'deepface': get_directory_size(os.environ.get('DEEPFACE_HOME', ''))
+    }
+# --- OPTIONAL MEMORY TRACKING UTILITIES END ---
 
 def is_valid_image(file_bytes) -> bool:
     """Validate image format"""
@@ -241,84 +279,31 @@ async def shutdown_event():
     tf.keras.backend.clear_session()
     logger.info("Service shutdown complete")
 
-
-
-# Add this new function to scan directories
-def scan_directory(path: str) -> Dict:
-    """Recursively scan directory and return structure with sizes"""
-    path = Path(path)
-    if not path.exists():
-        return {"error": f"Path {path} does not exist"}
-    
-    result = {
-        "path": str(path),
-        "type": "directory",
-        "size_mb": 0,
-        "contents": []
-    }
-    
-    try:
-        total_size = 0
-        for item in path.iterdir():
-            item_info = {
-                "name": item.name,
-                "path": str(item)
-            }
-            
-            if item.is_dir():
-                subdir = scan_directory(str(item))
-                item_info.update({
-                    "type": "directory",
-                    "size_mb": subdir["size_mb"],
-                    "contents": subdir["contents"]
-                })
-                total_size += subdir["size_mb"]
-            else:
-                size_mb = item.stat().st_size / (1024 * 1024)
-                item_info.update({
-                    "type": "file",
-                    "size_mb": round(size_mb, 4)
-                })
-                total_size += size_mb
-            
-            result["contents"].append(item_info)
-        
-        result["size_mb"] = round(total_size, 4)
-    except Exception as e:
-        result["error"] = str(e)
-    
-    return result
-
-
-# Update the health check endpoint
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     model_loaded = hasattr(app.state, 'model') and app.state.model is not None
-    
-    # Scan important directories
-    directories = {
-        "temp": scan_directory("/temp"),
-        "app": scan_directory("/app"),
-    }
-    
     return {
         "status": "healthy" if model_loaded else "unhealthy",
-        "model_loaded": model_loaded,
-        "directories": directories
+        "model_loaded": model_loaded
     }
-
-
 
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(files: List[UploadFile] = File(...)):
-  
-    # Dynamic batch sizing based on available capacity
-    BATCH_SIZE = min(10, len(files))  # Can adjust up to 4 based on your vCPU headroom
+    if len(files) > 10:
+        raise HTTPException(413, "Maximum 10 files allowed")
+
+    # Dynamic batch sizing
+    BATCH_SIZE = min(4, len(files))
     results = [None] * len(files)
     
     async def process_batch(batch_files):
         batch_results = []
         resource_mgrs = []
+        
+        # --- OPTIONAL MEMORY TRACKING START ---
+        disk_before = get_disk_usage()
+        initial_temp_files = set(scan_temp_files())
+        # --- OPTIONAL MEMORY TRACKING END ---
         
         try:
             # Prepare batch data
@@ -364,16 +349,22 @@ async def predict(files: List[UploadFile] = File(...)):
                     batch_inputs[1].append(face_img)
                     
                 except Exception as e:
-                    batch_results.append({
+                    result = {
                         "filename": file.filename,
                         "class": "ERROR",
                         "confidence": 0.0,
                         "probabilities": dict.fromkeys(CLASS_NAMES, 0.0),
-                        "error": str(e)
-                    })
+                        "error": str(e),
+                        # --- OPTIONAL MEMORY TRACKING START ---
+                        "disk_usage_before": disk_before,
+                        "disk_usage_after": get_disk_usage(),
+                        "temp_files_created": list(set(scan_temp_files()) - initial_temp_files)
+                        # --- OPTIONAL MEMORY TRACKING END ---
+                    }
+                    batch_results.append(result)
             
             # Batch prediction
-            if batch_inputs[0]:  # If we have valid inputs
+            if batch_inputs[0]:
                 predictions = await asyncio.get_event_loop().run_in_executor(
                     app.state.executor,
                     lambda: app.state.model.predict(
@@ -385,21 +376,32 @@ async def predict(files: List[UploadFile] = File(...)):
                 
                 for i, prediction in enumerate(predictions):
                     if prediction is not None and len(prediction) == len(CLASS_NAMES):
-                        batch_results.append({
+                        result = {
                             "filename": batch_files[i].filename,
                             "class": CLASS_NAMES[np.argmax(prediction)],
                             "confidence": float(np.max(prediction)),
                             "probabilities": dict(zip(CLASS_NAMES, prediction.astype(float).tolist())),
-                            "error": None
-                        })
+                            "error": None,
+                            # --- OPTIONAL MEMORY TRACKING START ---
+                            "disk_usage_before": disk_before,
+                            "disk_usage_after": get_disk_usage(),
+                            "temp_files_created": list(set(scan_temp_files()) - initial_temp_files)
+                            # --- OPTIONAL MEMORY TRACKING END ---
+                        }
                     else:
-                        batch_results.append({
+                        result = {
                             "filename": batch_files[i].filename,
                             "class": "ERROR",
                             "confidence": 0.0,
                             "probabilities": dict.fromkeys(CLASS_NAMES, 0.0),
-                            "error": "Invalid prediction result"
-                        })
+                            "error": "Invalid prediction result",
+                            # --- OPTIONAL MEMORY TRACKING START ---
+                            "disk_usage_before": disk_before,
+                            "disk_usage_after": get_disk_usage(),
+                            "temp_files_created": list(set(scan_temp_files()) - initial_temp_files)
+                            # --- OPTIONAL MEMORY TRACKING END ---
+                        }
+                    batch_results.append(result)
                         
         finally:
             for resource_mgr in resource_mgrs:
