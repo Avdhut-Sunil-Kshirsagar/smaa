@@ -63,7 +63,8 @@ class PredictionResult(BaseModel):
 class HealthCheckResponse(BaseModel):
     status: str
     model_loaded: bool
-
+    directories: Dict[str, Dict]
+    
 class RequestResourceManager:
     """Manages resources for a single request"""
     def __init__(self):
@@ -238,12 +239,69 @@ async def shutdown_event():
     tf.keras.backend.clear_session()
     logger.info("Service shutdown complete")
 
+# Add this new function to scan directories
+def scan_directory(path: str) -> Dict:
+    """Recursively scan directory and return structure with sizes"""
+    path = Path(path)
+    if not path.exists():
+        return {"error": f"Path {path} does not exist"}
+    
+    result = {
+        "path": str(path),
+        "type": "directory",
+        "size_mb": 0,
+        "contents": []
+    }
+    
+    try:
+        total_size = 0
+        for item in path.iterdir():
+            item_info = {
+                "name": item.name,
+                "path": str(item)
+            }
+            
+            if item.is_dir():
+                subdir = scan_directory(str(item))
+                item_info.update({
+                    "type": "directory",
+                    "size_mb": subdir["size_mb"],
+                    "contents": subdir["contents"]
+                })
+                total_size += subdir["size_mb"]
+            else:
+                size_mb = item.stat().st_size / (1024 * 1024)
+                item_info.update({
+                    "type": "file",
+                    "size_mb": round(size_mb, 4)
+                })
+                total_size += size_mb
+            
+            result["contents"].append(item_info)
+        
+        result["size_mb"] = round(total_size, 4)
+    except Exception as e:
+        result["error"] = str(e)
+    
+    return result
+
+
+# Update the health check endpoint
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     model_loaded = hasattr(app.state, 'model') and app.state.model is not None
+    
+    # Scan important directories
+    directories = {
+        "temp": scan_directory("/temp"),
+        "app": scan_directory("/app"),
+        "deepface_home": scan_directory(os.environ.get('DEEPFACE_HOME', '/app/.deepface'))
+    }
+    
     return {
         "status": "healthy" if model_loaded else "unhealthy",
-        "model_loaded": model_loaded
+        "model_loaded": model_loaded,
+        "directories": directories
     }
 
 @app.post("/predict", response_model=List[PredictionResult])
