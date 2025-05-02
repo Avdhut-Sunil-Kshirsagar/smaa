@@ -17,7 +17,7 @@ ENV DEEPFACE_HOME=/app/.deepface \
     TF_NUM_INTRAOP_THREADS=2 \
     OMP_NUM_THREADS=2 \
     MODEL_PATH=/app/model/final_model_11_4_2025.keras \
-    MAX_WORKERS=2 \
+    MAX_WORKERS=3 \
     MAX_FILE_SIZE=10485760 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1
@@ -67,4 +67,4 @@ USER 15000
 EXPOSE 8000
 
 CMD ["/opt/venv/bin/uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "1", "--limit-concurrency", "4", "--timeout-keep-alive", "60"]
+     "--workers", "1", "--limit-concurrency", "5", "--timeout-keep-alive", "60"]
