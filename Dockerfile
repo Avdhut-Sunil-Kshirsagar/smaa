@@ -1,70 +1,432 @@
-# Stage 1: Builder for model download
-FROM alpine:3.18 as downloader
+import os
+import sys
+import asyncio
+import logging
+import numpy as np
+import cv2
+import imghdr
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Dict, Optional, Tuple
+from pathlib import Path
 
-RUN apk add --no-cache wget
-RUN mkdir -p /model && \
-    wget -q -O /model/final_model_11_4_2025.keras \
-    "https://www.googleapis.com/drive/v3/files/1sUNdQHfqKBCW44wGEi158W2DK71g0BZE?alt=media&key=AIzaSyAQWd9J7XainNo1hx3cUzJsklrK-wm9Sng"
+# Configure environment before any imports
+os.environ.update({
+    'DEEPFACE_HOME': '/app/.deepface',
+    'CUDA_VISIBLE_DEVICES': '-1',
+    'TF_CPP_MIN_LOG_LEVEL': '2',
+    'TF_ENABLE_ONEDNN_OPTS': '1',
+    'DEEPFACE_CACHE': '0',
+    'OMP_NUM_THREADS': '1',
+    'OPENBLAS_NUM_THREADS': '1',
+    'MKL_NUM_THREADS': '1'
+})
 
-# Stage 2: Final image
-FROM python:3.10-slim
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Set environment variables
-ENV DEEPFACE_HOME=/app/.deepface \
-    CUDA_VISIBLE_DEVICES=-1 \
-    TF_CPP_MIN_LOG_LEVEL=3 \
-    TF_NUM_INTEROP_THREADS=2 \
-    TF_NUM_INTRAOP_THREADS=2 \
-    OMP_NUM_THREADS=2 \
-    MODEL_PATH=/app/model/final_model_11_4_2025.keras \
-    MAX_WORKERS=4 \
-    MAX_FILE_SIZE=10485760 \
-    PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+import tensorflow as tf
+from deepface import DeepFace
+from pydantic import BaseModel, Field
+from layers_helper import (
+    EfficientChannelAttention,
+    FixedSpatialAttention,
+    FixedHybridBlock
+)
 
-# Create app directory structure
-RUN mkdir -p /app/model ${DEEPFACE_HOME} && \
-    chmod -R 755 /app
+# Disable TensorFlow warnings
+tf.get_logger().setLevel('ERROR')
 
-# Copy pre-downloaded model
-COPY --from=downloader /model/final_model_11_4_2025.keras /app/model/
+app = FastAPI(
+    title="Deepfake Detection API",
+    description="Optimized API for detecting deepfake images on CPU",
+    version="2.1"
+)
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/* \
-    && python -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir -U pip setuptools wheel
+# Constants
+TARGET_SIZE = (224, 224)
+CLASS_NAMES = ['AI', 'FAKE', 'REAL']
+MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 10485760))  # 10MB
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', 4))
+MODEL_INPUT_SHAPE = (1, *TARGET_SIZE, 3)
 
-# Copy and install requirements
-COPY requirements.txt .
-RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
-    && rm requirements.txt
+# Pydantic Models
+class PredictionResult(BaseModel):
+    filename: str
+    class_: str = Field(..., alias="class")
+    confidence: float
+    probabilities: Dict[str, float]
+    error: Optional[str] = None
+    # --- OPTIONAL MEMORY TRACKING START ---
+    disk_usage_before: Optional[Dict[str, float]] = None  # MB
+    disk_usage_after: Optional[Dict[str, float]] = None   # MB
+    temp_files_created: Optional[List[str]] = None
+    # --- OPTIONAL MEMORY TRACKING END ---
 
-# Copy layer definitions and preload script
-COPY layers_helper.py .
-COPY preload_models.py .
+class HealthCheckResponse(BaseModel):
+    status: str
+    model_loaded: bool
 
-# Preload models with correct layer definitions
-RUN /opt/venv/bin/python preload_models.py && \
-    rm preload_models.py && \
-    chmod -R 755 ${DEEPFACE_HOME}
+class RequestResourceManager:
+    """Manages resources for a single request"""
+    def __init__(self):
+        self.temp_arrays = []
+        self.temp_files = []
+    
+    def add_temp_array(self, arr):
+        self.temp_arrays.append(arr)
+    
+    def add_temp_file(self, filepath):
+        self.temp_files.append(filepath)
+    
+    def cleanup(self):
+        tf.keras.backend.clear_session()
+        for arr in self.temp_arrays: 
+            del arr
+        for filepath in self.temp_files:
+            try:
+                if os.path.exists(filepath):
+                    os.unlink(filepath)
+            except:
+                pass
+        self.temp_arrays.clear()
+        self.temp_files.clear()
 
-# Copy application code
-COPY app.py .
+# --- OPTIONAL MEMORY TRACKING UTILITIES START ---
+def get_directory_size(path: str) -> float:
+    """Get directory size in MB"""
+    try:
+        if not os.path.exists(path):
+            return 0.0
+        total = 0
+        for entry in os.scandir(path):
+            if entry.is_file():
+                total += entry.stat().st_size
+            elif entry.is_dir():
+                total += get_directory_size(entry.path)
+        return round(total / (1024 * 1024), 2)  # Convert to MB
+    except:
+        return 0.0
 
-# Cleanup
-RUN apt-get purge -y --auto-remove \
-    && rm -rf /root/.cache /tmp/*
+def scan_temp_files() -> List[str]:
+    """Scan for temporary files created during processing"""
+    temp_dirs = ['/tmp', '/app/tmp', os.environ.get('DEEPFACE_HOME', '')]
+    temp_files = []
+    for temp_dir in temp_dirs:
+        if temp_dir and os.path.exists(temp_dir):
+            for root, _, files in os.walk(temp_dir):
+                for file in files:
+                    temp_files.append(os.path.join(root, file))
+    return temp_files
 
-# Non-root user setup
-RUN useradd -mU -u 15000 appuser \
-    && chown -R appuser:appuser /app ${DEEPFACE_HOME}
+def get_disk_usage() -> Dict[str, float]:
+    """Get disk usage for key directories in MB"""
+    return {
+        'app': get_directory_size('/app'),
+        'tmp': get_directory_size('/tmp'),
+        'deepface': get_directory_size(os.environ.get('DEEPFACE_HOME', ''))
+    }
+# --- OPTIONAL MEMORY TRACKING UTILITIES END ---
 
-USER 15000
+def is_valid_image(file_bytes) -> bool:
+    """Validate image format"""
+    try: 
+        return imghdr.what(None, h=file_bytes) in ['jpeg', 'jpg', 'png']
+    except: 
+        return False
 
-EXPOSE 8000
+def ensure_uint8(img: np.ndarray) -> np.ndarray:
+    """Ensure image is in uint8 format"""
+    if img.dtype != np.uint8:
+        if img.dtype == np.float64:
+            img = (img * 255).astype(np.uint8)
+        else:
+            img = img.astype(np.uint8)
+    return img
 
-CMD ["/opt/venv/bin/uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "1", "--limit-concurrency", "4", "--timeout-keep-alive", "60"]
+def preprocess_image(img: np.ndarray) -> np.ndarray:
+    """Optimized image preprocessing pipeline"""
+    try:
+        # Ensure proper image format
+        img = ensure_uint8(img)
+        
+        # Convert color space and resize
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = img.astype(np.float32) * (1./255.0)
+        img = cv2.resize(img, TARGET_SIZE, interpolation=cv2.INTER_AREA)
+        return img
+    except Exception as e:
+        logger.error(f"Preprocessing error: {str(e)}")
+        raise ValueError("Image preprocessing failed")
+
+def extract_face(img: np.ndarray) -> np.ndarray:
+    """Optimized and robust face extraction"""
+    try:
+        # Ensure proper image format for DeepFace
+        img_rgb = cv2.cvtColor(ensure_uint8(img), cv2.COLOR_BGR2RGB)
+        
+        faces = DeepFace.extract_faces(
+            img_path=img_rgb,
+            detector_backend='opencv',
+            enforce_detection=False,
+            align=False,
+            grayscale=False
+        )
+        
+        if faces and 'face' in faces[0]:
+            face_img = faces[0]['face']
+            # Ensure face image is in correct format
+            if isinstance(face_img, np.ndarray):
+                return face_img
+        return img
+    except Exception as e:
+        logger.warning(f"Face extraction failed, using full image: {str(e)}")
+        return img
+
+def process_image_in_memory(file_bytes: bytes, resource_mgr: RequestResourceManager) -> Tuple[np.ndarray, np.ndarray]:
+    """Process image with robust error handling"""
+    try:
+        # Decode image
+        nparr = np.frombuffer(file_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("Invalid image data")
+        
+        # Process full image with error handling
+        try:
+            full_img = preprocess_image(img)
+        except Exception as e:
+            logger.error(f"Full image processing failed: {str(e)}")
+            raise ValueError("Full image processing failed")
+        
+        # Process face image with fallback
+        try:
+            face_img = extract_face(img)
+            face_img = preprocess_image(face_img)
+        except Exception as e:
+            logger.warning(f"Face processing failed, using full image: {str(e)}")
+            face_img = full_img.copy()
+        
+        resource_mgr.add_temp_array(full_img)
+        resource_mgr.add_temp_array(face_img)
+        
+        return full_img, face_img
+        
+    except Exception as e:
+        logger.error(f"Image processing error: {str(e)}")
+        raise
+
+@app.on_event("startup")
+async def startup_event():
+    try:
+        # Configure TensorFlow for CPU optimization
+        tf.config.optimizer.set_experimental_options({
+            'constant_folding': True,
+            'shape_optimization': True,
+            'arithmetic_optimization': True,
+            'disable_meta_optimizer': False,
+            'remapping': True,
+        })
+        
+        # Set thread configuration
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        tf.config.threading.set_inter_op_parallelism_threads(1)
+        
+        # Disable TensorFlow features that consume memory
+        tf.config.optimizer.set_jit(False)
+        
+        # Load main model with custom layers
+        custom_objects = {
+            'EfficientChannelAttention': EfficientChannelAttention,
+            'FixedSpatialAttention': FixedSpatialAttention,
+            'FixedHybridBlock': FixedHybridBlock
+        }
+        
+        # Load model with optimized settings
+        app.state.model = tf.keras.models.load_model(
+            os.environ['MODEL_PATH'],
+            custom_objects=custom_objects,
+            compile=False
+        )
+        
+        # Disable training mode
+        app.state.model.trainable = False
+        
+        # Warm up model with correct input shape
+        dummy_input = [
+            np.zeros(MODEL_INPUT_SHAPE, dtype=np.float32),
+            np.zeros(MODEL_INPUT_SHAPE, dtype=np.float32)
+        ]
+        app.state.model.predict(dummy_input, verbose=0, batch_size=1)
+        
+        # Initialize thread pool with limited workers
+        app.state.executor = ThreadPoolExecutor(
+            max_workers=MAX_WORKERS,
+            thread_name_prefix='deepfake_worker'
+        )
+        
+        logger.info(f"Service initialized. Model input shape: {MODEL_INPUT_SHAPE}")
+    except Exception as e:
+        logger.error(f"Startup failed: {str(e)}")
+        sys.exit(1)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if hasattr(app.state, 'executor'):
+        app.state.executor.shutdown(wait=False)
+    tf.keras.backend.clear_session()
+    logger.info("Service shutdown complete")
+
+@app.get("/health", response_model=HealthCheckResponse)
+async def health_check():
+    model_loaded = hasattr(app.state, 'model') and app.state.model is not None
+    return {
+        "status": "healthy" if model_loaded else "unhealthy",
+        "model_loaded": model_loaded
+    }
+
+@app.post("/predict", response_model=List[PredictionResult])
+async def predict(files: List[UploadFile] = File(...)):
+    if len(files) > 10:
+        raise HTTPException(413, "Maximum 10 files allowed")
+
+    # Dynamic batch sizing
+    BATCH_SIZE = min(4, len(files))
+    results = [None] * len(files)
+    
+    async def process_batch(batch_files):
+        batch_results = []
+        resource_mgrs = []
+        
+        # --- OPTIONAL MEMORY TRACKING START ---
+        disk_before = get_disk_usage()
+        initial_temp_files = set(scan_temp_files())
+        # --- OPTIONAL MEMORY TRACKING END ---
+        
+        try:
+            # Prepare batch data
+            batch_inputs = [[], []]  # [full_imgs, face_imgs]
+            
+            for file in batch_files:
+                resource_mgr = RequestResourceManager()
+                resource_mgrs.append(resource_mgr)
+                
+                try:
+                    file_bytes = await file.read()
+                    if len(file_bytes) > MAX_FILE_SIZE:
+                        raise ValueError("File size exceeds limit")
+                    if not is_valid_image(file_bytes):
+                        raise ValueError("Invalid image format")
+                    
+                    # Process image
+                    nparr = np.frombuffer(file_bytes, np.uint8)
+                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if img is None:
+                        raise ValueError("Invalid image data")
+                    
+                    # Process full image
+                    full_img = preprocess_image(ensure_uint8(img))
+                    
+                    # Try face extraction
+                    face_img = full_img  # Default to full image
+                    try:
+                        face_img_rgb = cv2.cvtColor(ensure_uint8(img), cv2.COLOR_BGR2RGB)
+                        faces = DeepFace.extract_faces(
+                            img_path=face_img_rgb,
+                            detector_backend='opencv',
+                            enforce_detection=False,
+                            align=False,
+                            grayscale=False
+                        )
+                        if faces and 'face' in faces[0] and isinstance(faces[0]['face'], np.ndarray):
+                            face_img = preprocess_image(faces[0]['face'])
+                    except Exception:
+                        pass  # Use full_img as fallback
+                    
+                    batch_inputs[0].append(full_img)
+                    batch_inputs[1].append(face_img)
+                    
+                except Exception as e:
+                    result = {
+                        "filename": file.filename,
+                        "class": "ERROR",
+                        "confidence": 0.0,
+                        "probabilities": dict.fromkeys(CLASS_NAMES, 0.0),
+                        "error": str(e),
+                        # --- OPTIONAL MEMORY TRACKING START ---
+                        "disk_usage_before": disk_before,
+                        "disk_usage_after": get_disk_usage(),
+                        "temp_files_created": list(set(scan_temp_files()) - initial_temp_files)
+                        # --- OPTIONAL MEMORY TRACKING END ---
+                    }
+                    batch_results.append(result)
+            
+            # Batch prediction
+            if batch_inputs[0]:
+                predictions = await asyncio.get_event_loop().run_in_executor(
+                    app.state.executor,
+                    lambda: app.state.model.predict(
+                        [np.array(batch_inputs[0]), np.array(batch_inputs[1])],
+                        verbose=0,
+                        batch_size=BATCH_SIZE
+                    )
+                )
+                
+                for i, prediction in enumerate(predictions):
+                    if prediction is not None and len(prediction) == len(CLASS_NAMES):
+                        result = {
+                            "filename": batch_files[i].filename,
+                            "class": CLASS_NAMES[np.argmax(prediction)],
+                            "confidence": float(np.max(prediction)),
+                            "probabilities": dict(zip(CLASS_NAMES, prediction.astype(float).tolist())),
+                            "error": None,
+                            # --- OPTIONAL MEMORY TRACKING START ---
+                            "disk_usage_before": disk_before,
+                            "disk_usage_after": get_disk_usage(),
+                            "temp_files_created": list(set(scan_temp_files()) - initial_temp_files)
+                            # --- OPTIONAL MEMORY TRACKING END ---
+                        }
+                    else:
+                        result = {
+                            "filename": batch_files[i].filename,
+                            "class": "ERROR",
+                            "confidence": 0.0,
+                            "probabilities": dict.fromkeys(CLASS_NAMES, 0.0),
+                            "error": "Invalid prediction result",
+                            # --- OPTIONAL MEMORY TRACKING START ---
+                            "disk_usage_before": disk_before,
+                            "disk_usage_after": get_disk_usage(),
+                            "temp_files_created": list(set(scan_temp_files()) - initial_temp_files)
+                            # --- OPTIONAL MEMORY TRACKING END ---
+                        }
+                    batch_results.append(result)
+                        
+        finally:
+            for resource_mgr in resource_mgrs:
+                resource_mgr.cleanup()
+            tf.keras.backend.clear_session()
+            
+        return batch_results
+
+    # Process in batches
+    for i in range(0, len(files), BATCH_SIZE):
+        batch = files[i:i+BATCH_SIZE]
+        batch_results = await process_batch(batch)
+        for j, result in enumerate(batch_results):
+            results[i+j] = result
+    
+    return results
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        workers=1,
+        limit_concurrency=4,
+        timeout_keep_alive=60,
+        log_level="info"
+    )
