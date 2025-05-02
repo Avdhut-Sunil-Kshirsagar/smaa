@@ -361,7 +361,7 @@ if __name__ == "__main__":
         host="0.0.0.0", 
         port=8000,
         workers=1,
-        limit_concurrency=4,
+        limit_concurrency=8,
         timeout_keep_alive=60,
         log_level="info"
     )
