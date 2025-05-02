@@ -6,7 +6,7 @@ import numpy as np
 import cv2
 import imghdr
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from pathlib import Path
 
 # Configure environment before any imports
@@ -49,7 +49,7 @@ app = FastAPI(
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
 MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 10485760))  # 10MB
-MAX_WORKERS = int(os.getenv('MAX_WORKERS', 2))
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', 4))
 MODEL_INPUT_SHAPE = (1, *TARGET_SIZE, 3)
 
 # Pydantic Models
@@ -59,16 +59,10 @@ class PredictionResult(BaseModel):
     confidence: float
     probabilities: Dict[str, float]
     error: Optional[str] = None
-    disk_usage_before: Dict[str, int]
-    disk_usage_after: Dict[str, int]
-    processing_time_ms: float
 
 class HealthCheckResponse(BaseModel):
     status: str
     model_loaded: bool
-    model_path: Optional[str] = None
-    model_exists: bool
-    system_info: Dict[str, str]
 
 class RequestResourceManager:
     """Manages resources for a single request"""
@@ -94,21 +88,6 @@ class RequestResourceManager:
                 pass
         self.temp_arrays.clear()
         self.temp_files.clear()
-
-def get_disk_usage(path: str) -> int:
-    """Get total size of directory in bytes"""
-    try:
-        return sum(f.stat().st_size for f in Path(path).rglob('*') if f.is_file())
-    except:
-        return 0
-
-def get_system_info() -> Dict[str, str]:
-    """Get basic system information"""
-    return {
-        "cpu_count": str(os.cpu_count()),
-        "platform": sys.platform,
-        "python_version": sys.version.split()[0]
-    }
 
 def is_valid_image(file_bytes) -> bool:
     """Validate image format"""
@@ -262,29 +241,15 @@ async def shutdown_event():
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     model_loaded = hasattr(app.state, 'model') and app.state.model is not None
-    model_path = os.environ.get('MODEL_PATH')
     return {
         "status": "healthy" if model_loaded else "unhealthy",
-        "model_loaded": model_loaded,
-        "model_path": model_path,
-        "model_exists": os.path.exists(model_path) if model_path else False,
-        "system_info": get_system_info()
+        "model_loaded": model_loaded
     }
 
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(files: List[UploadFile] = File(...)):
-    if len(files) > 10:
-        raise HTTPException(413, "Maximum 10 files allowed")
-    
     async def process_wrapper(file: UploadFile):
-        start_time = asyncio.get_event_loop().time()
         resource_mgr = RequestResourceManager()
-        
-        # Get disk usage before processing
-        disk_before = {
-            "app": get_disk_usage("/app"),
-            "tmp": get_disk_usage("/tmp")
-        }
         
         # Initialize result with default values
         result = {
@@ -292,10 +257,7 @@ async def predict(files: List[UploadFile] = File(...)):
             "class": "UNKNOWN",
             "confidence": 0.0,
             "probabilities": {name: 0.0 for name in CLASS_NAMES},
-            "error": None,
-            "disk_usage_before": disk_before,
-            "disk_usage_after": {},
-            "processing_time_ms": 0
+            "error": None
         }
         
         try:
@@ -341,16 +303,6 @@ async def predict(files: List[UploadFile] = File(...)):
             logger.error(f"Error processing {file.filename}: {str(e)}", exc_info=True)
             
         finally:
-            # Get disk usage after processing
-            result["disk_usage_after"] = {
-                "app": get_disk_usage("/app"),
-                "tmp": get_disk_usage("/tmp")
-            }
-            
-            # Calculate processing time
-            end_time = asyncio.get_event_loop().time()
-            result["processing_time_ms"] = round((end_time - start_time) * 1000, 2)
-            
             # Cleanup resources
             resource_mgr.cleanup()
             
@@ -370,7 +322,7 @@ if __name__ == "__main__":
         host="0.0.0.0", 
         port=8000,
         workers=1,
-        limit_concurrency=2,
-        timeout_keep_alive=30,
+        limit_concurrency=4,
+        timeout_keep_alive=60,
         log_level="info"
     )
