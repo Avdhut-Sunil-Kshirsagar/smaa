@@ -49,7 +49,7 @@ app = FastAPI(
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
 MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 10485760))  # 10MB
-MAX_WORKERS = int(os.getenv('MAX_WORKERS', 4))
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', 8))
 MODEL_INPUT_SHAPE = (1, *TARGET_SIZE, 3)
 
 # Pydantic Models
