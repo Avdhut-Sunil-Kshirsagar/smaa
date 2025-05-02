@@ -49,7 +49,7 @@ app = FastAPI(
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
 MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 10485760))  # 10MB
-MAX_WORKERS = int(os.getenv('MAX_WORKERS', 2))
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', 3))
 MODEL_INPUT_SHAPE = (1, *TARGET_SIZE, 3)
 
 # Pydantic Models
@@ -248,11 +248,8 @@ async def health_check():
 
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(files: List[UploadFile] = File(...)):
-    if len(files) > 10:
-        raise HTTPException(413, "Maximum 10 files allowed")
-
     # Dynamic batch sizing based on available capacity
-    BATCH_SIZE = min(4, len(files))  # Can adjust up to 4 based on your vCPU headroom
+    BATCH_SIZE = min(10, len(files))  # Can adjust up to 4 based on your vCPU headroom
     results = [None] * len(files)
     
     async def process_batch(batch_files):
@@ -364,7 +361,7 @@ if __name__ == "__main__":
         host="0.0.0.0", 
         port=8000,
         workers=1,
-        limit_concurrency=2,
+        limit_concurrency=5,
         timeout_keep_alive=30,
         log_level="info"
     )
