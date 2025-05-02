@@ -248,9 +248,7 @@ async def health_check():
 
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(files: List[UploadFile] = File(...)):
-    if len(files) > 10:
-        raise HTTPException(413, "Maximum 10 files allowed")
-
+  
     # Dynamic batch sizing based on available capacity
     BATCH_SIZE = min(4, len(files))  # Can adjust up to 4 based on your vCPU headroom
     results = [None] * len(files)
