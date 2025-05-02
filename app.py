@@ -7,6 +7,7 @@ import cv2
 import imghdr
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple
+import inspect
 from pathlib import Path
 
 # Configure environment before any imports
