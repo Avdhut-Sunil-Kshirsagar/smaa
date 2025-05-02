@@ -250,7 +250,7 @@ async def health_check():
 async def predict(files: List[UploadFile] = File(...)):
   
     # Dynamic batch sizing based on available capacity
-    BATCH_SIZE = min(4, len(files))  # Can adjust up to 4 based on your vCPU headroom
+    BATCH_SIZE = min(10, len(files))  # Can adjust up to 4 based on your vCPU headroom
     results = [None] * len(files)
     
     async def process_batch(batch_files):
