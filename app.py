@@ -5,6 +5,8 @@ import logging
 import numpy as np
 import cv2
 import imghdr
+import gc
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
@@ -51,6 +53,10 @@ CLASS_NAMES = ['AI', 'FAKE', 'REAL']
 MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', 10485760))  # 10MB
 MAX_WORKERS = int(os.getenv('MAX_WORKERS', 4))
 MODEL_INPUT_SHAPE = (1, *TARGET_SIZE, 3)
+TEMP_DIR = '/tmp/deepfake_temp'
+
+# Create temp directory if not exists
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 # Pydantic Models
 class PredictionResult(BaseModel):
@@ -59,15 +65,11 @@ class PredictionResult(BaseModel):
     confidence: float
     probabilities: Dict[str, float]
     error: Optional[str] = None
-    # --- OPTIONAL MEMORY TRACKING START ---
-    disk_usage_before: Optional[Dict[str, float]] = None  # MB
-    disk_usage_after: Optional[Dict[str, float]] = None   # MB
-    temp_files_created: Optional[List[str]] = None
-    # --- OPTIONAL MEMORY TRACKING END ---
 
 class HealthCheckResponse(BaseModel):
     status: str
     model_loaded: bool
+    disk_usage: Dict[str, int]
 
 class RequestResourceManager:
     """Manages resources for a single request"""
@@ -82,53 +84,64 @@ class RequestResourceManager:
         self.temp_files.append(filepath)
     
     def cleanup(self):
+        # Clear TensorFlow session
         tf.keras.backend.clear_session()
-        for arr in self.temp_arrays: 
-            del arr
+        
+        # Delete numpy arrays
+        for arr in self.temp_arrays:
+            try:
+                del arr
+            except:
+                pass
+        
+        # Delete temporary files
         for filepath in self.temp_files:
             try:
                 if os.path.exists(filepath):
                     os.unlink(filepath)
             except:
                 pass
+        
         self.temp_arrays.clear()
         self.temp_files.clear()
 
-# --- OPTIONAL MEMORY TRACKING UTILITIES START ---
-def get_directory_size(path: str) -> float:
-    """Get directory size in MB"""
+def cleanup_system_resources():
+    """Cleanup all system resources aggressively"""
     try:
-        if not os.path.exists(path):
-            return 0.0
-        total = 0
-        for entry in os.scandir(path):
-            if entry.is_file():
-                total += entry.stat().st_size
-            elif entry.is_dir():
-                total += get_directory_size(entry.path)
-        return round(total / (1024 * 1024), 2)  # Convert to MB
-    except:
-        return 0.0
+        # Clear TensorFlow session and cache
+        tf.keras.backend.clear_session()
+        tf.compat.v1.reset_default_graph()
+        
+        # Cleanup temp directory
+        for filename in os.listdir(TEMP_DIR):
+            file_path = os.path.join(TEMP_DIR, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                logger.warning(f"Failed to delete {file_path}. Reason: {e}")
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Clear DeepFace cache
+        try:
+            from deepface.commons import functions
+            functions.clean_weights()
+        except:
+            pass
+        
+    except Exception as e:
+        logger.error(f"Resource cleanup failed: {str(e)}")
 
-def scan_temp_files() -> List[str]:
-    """Scan for temporary files created during processing"""
-    temp_dirs = ['/tmp', '/app/tmp', os.environ.get('DEEPFACE_HOME', '')]
-    temp_files = []
-    for temp_dir in temp_dirs:
-        if temp_dir and os.path.exists(temp_dir):
-            for root, _, files in os.walk(temp_dir):
-                for file in files:
-                    temp_files.append(os.path.join(root, file))
-    return temp_files
-
-def get_disk_usage() -> Dict[str, float]:
-    """Get disk usage for key directories in MB"""
+def get_disk_usage() -> Dict[str, int]:
+    """Get disk usage statistics"""
     return {
-        'app': get_directory_size('/app'),
-        'tmp': get_directory_size('/tmp'),
-        'deepface': get_directory_size(os.environ.get('DEEPFACE_HOME', ''))
+        'temp_dir': sum(f.stat().st_size for f in Path(TEMP_DIR).rglob('*') if f.is_file()),
+        'app_dir': sum(f.stat().st_size for f in Path('/app').rglob('*') if f.is_file())
     }
-# --- OPTIONAL MEMORY TRACKING UTILITIES END ---
 
 def is_valid_image(file_bytes) -> bool:
     """Validate image format"""
@@ -267,6 +280,9 @@ async def startup_event():
             thread_name_prefix='deepfake_worker'
         )
         
+        # Cleanup any existing temp files
+        cleanup_system_resources()
+        
         logger.info(f"Service initialized. Model input shape: {MODEL_INPUT_SHAPE}")
     except Exception as e:
         logger.error(f"Startup failed: {str(e)}")
@@ -274,36 +290,35 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    if hasattr(app.state, 'executor'):
-        app.state.executor.shutdown(wait=False)
-    tf.keras.backend.clear_session()
-    logger.info("Service shutdown complete")
+    try:
+        if hasattr(app.state, 'executor'):
+            app.state.executor.shutdown(wait=False)
+        
+        # Aggressive cleanup on shutdown
+        cleanup_system_resources()
+        
+        logger.info("Service shutdown complete with full resource cleanup")
+    except Exception as e:
+        logger.error(f"Shutdown cleanup failed: {str(e)}")
 
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     model_loaded = hasattr(app.state, 'model') and app.state.model is not None
     return {
         "status": "healthy" if model_loaded else "unhealthy",
-        "model_loaded": model_loaded
+        "model_loaded": model_loaded,
+        "disk_usage": get_disk_usage()
     }
 
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(files: List[UploadFile] = File(...)):
-    if len(files) > 10:
-        raise HTTPException(413, "Maximum 10 files allowed")
-
-    # Dynamic batch sizing
-    BATCH_SIZE = min(4, len(files))
+    # Dynamic batch sizing based on available capacity
+    BATCH_SIZE = min(10, len(files))  # Optimal batch size for 0.5 vCPU
     results = [None] * len(files)
     
     async def process_batch(batch_files):
         batch_results = []
         resource_mgrs = []
-        
-        # --- OPTIONAL MEMORY TRACKING START ---
-        disk_before = get_disk_usage()
-        initial_temp_files = set(scan_temp_files())
-        # --- OPTIONAL MEMORY TRACKING END ---
         
         try:
             # Prepare batch data
@@ -349,22 +364,16 @@ async def predict(files: List[UploadFile] = File(...)):
                     batch_inputs[1].append(face_img)
                     
                 except Exception as e:
-                    result = {
+                    batch_results.append({
                         "filename": file.filename,
                         "class": "ERROR",
                         "confidence": 0.0,
                         "probabilities": dict.fromkeys(CLASS_NAMES, 0.0),
-                        "error": str(e),
-                        # --- OPTIONAL MEMORY TRACKING START ---
-                        "disk_usage_before": disk_before,
-                        "disk_usage_after": get_disk_usage(),
-                        "temp_files_created": list(set(scan_temp_files()) - initial_temp_files)
-                        # --- OPTIONAL MEMORY TRACKING END ---
-                    }
-                    batch_results.append(result)
+                        "error": str(e)
+                    })
             
             # Batch prediction
-            if batch_inputs[0]:
+            if batch_inputs[0]:  # If we have valid inputs
                 predictions = await asyncio.get_event_loop().run_in_executor(
                     app.state.executor,
                     lambda: app.state.model.predict(
@@ -376,48 +385,46 @@ async def predict(files: List[UploadFile] = File(...)):
                 
                 for i, prediction in enumerate(predictions):
                     if prediction is not None and len(prediction) == len(CLASS_NAMES):
-                        result = {
+                        batch_results.append({
                             "filename": batch_files[i].filename,
                             "class": CLASS_NAMES[np.argmax(prediction)],
                             "confidence": float(np.max(prediction)),
                             "probabilities": dict(zip(CLASS_NAMES, prediction.astype(float).tolist())),
-                            "error": None,
-                            # --- OPTIONAL MEMORY TRACKING START ---
-                            "disk_usage_before": disk_before,
-                            "disk_usage_after": get_disk_usage(),
-                            "temp_files_created": list(set(scan_temp_files()) - initial_temp_files)
-                            # --- OPTIONAL MEMORY TRACKING END ---
-                        }
+                            "error": None
+                        })
                     else:
-                        result = {
+                        batch_results.append({
                             "filename": batch_files[i].filename,
                             "class": "ERROR",
                             "confidence": 0.0,
                             "probabilities": dict.fromkeys(CLASS_NAMES, 0.0),
-                            "error": "Invalid prediction result",
-                            # --- OPTIONAL MEMORY TRACKING START ---
-                            "disk_usage_before": disk_before,
-                            "disk_usage_after": get_disk_usage(),
-                            "temp_files_created": list(set(scan_temp_files()) - initial_temp_files)
-                            # --- OPTIONAL MEMORY TRACKING END ---
-                        }
-                    batch_results.append(result)
+                            "error": "Invalid prediction result"
+                        })
                         
         finally:
+            # Cleanup resources for this batch
             for resource_mgr in resource_mgrs:
                 resource_mgr.cleanup()
+            
+            # Additional cleanup between batches
             tf.keras.backend.clear_session()
+            gc.collect()
             
         return batch_results
 
-    # Process in batches
-    for i in range(0, len(files), BATCH_SIZE):
-        batch = files[i:i+BATCH_SIZE]
-        batch_results = await process_batch(batch)
-        for j, result in enumerate(batch_results):
-            results[i+j] = result
-    
-    return results
+    try:
+        # Process in batches
+        for i in range(0, len(files), BATCH_SIZE):
+            batch = files[i:i+BATCH_SIZE]
+            batch_results = await process_batch(batch)
+            for j, result in enumerate(batch_results):
+                results[i+j] = result
+        
+        return results
+        
+    finally:
+        # Final cleanup after all processing
+        cleanup_system_resources()
 
 if __name__ == "__main__":
     import uvicorn
