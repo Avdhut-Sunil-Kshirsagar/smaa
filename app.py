@@ -240,70 +240,83 @@ async def shutdown_event():
     logger.info("Service shutdown complete")
 
 
-# function to scan directories
+def get_app_base_directory() -> Path:
+    """Get the directory where the main app module is located"""
+    try:
+        # This will get the file path of the current module
+        app_file = inspect.getfile(inspect.currentframe())
+        return Path(app_file).parent.resolve()
+    except Exception as e:
+        logger.warning(f"Could not detect app directory: {str(e)}")
+        return Path.cwd()  # Fallback to current working directory
+
+# Update your scan_directory function (if you want more details)
 def scan_directory(path: str) -> Dict:
-    """Recursively scan directory and return structure with sizes"""
+    """Enhanced directory scanner with more metadata"""
     path = Path(path)
-    if not path.exists():
-        return {"error": f"Path {path} does not exist"}
-    
     result = {
         "path": str(path),
+        "absolute_path": str(path.resolve()),
         "type": "directory",
         "size_mb": 0,
+        "file_count": 0,
+        "directory_count": 0,
         "contents": []
     }
     
     try:
-        total_size = 0
         for item in path.iterdir():
             item_info = {
                 "name": item.name,
-                "path": str(item)
+                "type": "directory" if item.is_dir() else "file",
+                "size_mb": 0,
+                "modified_time": item.stat().st_mtime
             }
             
             if item.is_dir():
                 subdir = scan_directory(str(item))
                 item_info.update({
-                    "type": "directory",
                     "size_mb": subdir["size_mb"],
-                    "contents": subdir["contents"]
+                    "contents": subdir["contents"],
+                    "file_count": subdir["file_count"],
+                    "directory_count": subdir["directory_count"] + 1
                 })
-                total_size += subdir["size_mb"]
+                result["directory_count"] += 1
             else:
                 size_mb = item.stat().st_size / (1024 * 1024)
-                item_info.update({
-                    "type": "file",
-                    "size_mb": round(size_mb, 4)
-                })
-                total_size += size_mb
+                item_info["size_mb"] = round(size_mb, 6)
+                result["file_count"] += 1
             
+            result["size_mb"] += item_info["size_mb"]
             result["contents"].append(item_info)
         
-        result["size_mb"] = round(total_size, 4)
+        result["size_mb"] = round(result["size_mb"], 6)
     except Exception as e:
         result["error"] = str(e)
+        result["access_denied"] = True
     
     return result
+
 
 
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     model_loaded = hasattr(app.state, 'model') and app.state.model is not None
-    
-    # Scan important directories
-    directories = {
-        "temp": scan_directory("/temp"),
-        "app": scan_directory("/app"),
-        "deepface_home": scan_directory(os.environ.get('DEEPFACE_HOME', '/app/.deepface'))
-    }
+    app_dir = get_app_base_directory()
     
     return {
         "status": "healthy" if model_loaded else "unhealthy",
         "model_loaded": model_loaded,
-        "directories": directories
+        "current_app_directory": str(app_dir),
+        "current_working_directory": str(Path.cwd()),
+        "directories": {
+            "temp": scan_directory("/temp"),
+            "app_root": scan_directory("/app"),
+            "app_current": scan_directory(str(app_dir)),
+            "deepface_home": scan_directory(os.environ.get('DEEPFACE_HOME', '/app/.deepface'))
+        }
     }
-
+    
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(files: List[UploadFile] = File(...)):
   
