@@ -133,6 +133,7 @@ async def predict(files: List[UploadFile] = File(...)):
         batch_group = files[i:i+BATCH_SIZE * MAX_CONCURRENT_BATCHES]
         batch_tasks.append(
             process_batch(processor, batch_group)
+        )
     
     # Collect and flatten results
     batch_results = await asyncio.gather(*batch_tasks)
