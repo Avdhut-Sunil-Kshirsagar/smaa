@@ -239,7 +239,8 @@ async def shutdown_event():
     tf.keras.backend.clear_session()
     logger.info("Service shutdown complete")
 
-# Add this new function to scan directories
+
+# function to scan directories
 def scan_directory(path: str) -> Dict:
     """Recursively scan directory and return structure with sizes"""
     path = Path(path)
@@ -286,7 +287,6 @@ def scan_directory(path: str) -> Dict:
     return result
 
 
-# Update the health check endpoint
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     model_loaded = hasattr(app.state, 'model') and app.state.model is not None
