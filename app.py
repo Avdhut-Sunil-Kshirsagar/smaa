@@ -248,70 +248,111 @@ async def health_check():
 
 @app.post("/predict", response_model=List[PredictionResult])
 async def predict(files: List[UploadFile] = File(...)):
-    async def process_wrapper(file: UploadFile):
-        resource_mgr = RequestResourceManager()
-        
-        # Initialize result with default values
-        result = {
-            "filename": file.filename,
-            "class": "UNKNOWN",
-            "confidence": 0.0,
-            "probabilities": {name: 0.0 for name in CLASS_NAMES},
-            "error": None
-        }
+    if len(files) > 10:
+        raise HTTPException(413, "Maximum 10 files allowed")
+
+    # Dynamic batch sizing based on available capacity
+    BATCH_SIZE = min(4, len(files))  # Can adjust up to 4 based on your vCPU headroom
+    results = [None] * len(files)
+    
+    async def process_batch(batch_files):
+        batch_results = []
+        resource_mgrs = []
         
         try:
-            # Validate input
-            file_bytes = await file.read()
-            if len(file_bytes) > MAX_FILE_SIZE:
-                raise ValueError("File size exceeds limit")
-            if not is_valid_image(file_bytes):
-                raise ValueError("Invalid image format")
+            # Prepare batch data
+            batch_inputs = [[], []]  # [full_imgs, face_imgs]
             
-            # Process image
-            full_img, face_img = process_image_in_memory(file_bytes, resource_mgr)
+            for file in batch_files:
+                resource_mgr = RequestResourceManager()
+                resource_mgrs.append(resource_mgr)
+                
+                try:
+                    file_bytes = await file.read()
+                    if len(file_bytes) > MAX_FILE_SIZE:
+                        raise ValueError("File size exceeds limit")
+                    if not is_valid_image(file_bytes):
+                        raise ValueError("Invalid image format")
+                    
+                    # Process image
+                    nparr = np.frombuffer(file_bytes, np.uint8)
+                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if img is None:
+                        raise ValueError("Invalid image data")
+                    
+                    # Process full image
+                    full_img = preprocess_image(ensure_uint8(img))
+                    
+                    # Try face extraction
+                    face_img = full_img  # Default to full image
+                    try:
+                        face_img_rgb = cv2.cvtColor(ensure_uint8(img), cv2.COLOR_BGR2RGB)
+                        faces = DeepFace.extract_faces(
+                            img_path=face_img_rgb,
+                            detector_backend='opencv',
+                            enforce_detection=False,
+                            align=False,
+                            grayscale=False
+                        )
+                        if faces and 'face' in faces[0] and isinstance(faces[0]['face'], np.ndarray):
+                            face_img = preprocess_image(faces[0]['face'])
+                    except Exception:
+                        pass  # Use full_img as fallback
+                    
+                    batch_inputs[0].append(full_img)
+                    batch_inputs[1].append(face_img)
+                    
+                except Exception as e:
+                    batch_results.append({
+                        "filename": file.filename,
+                        "class": "ERROR",
+                        "confidence": 0.0,
+                        "probabilities": dict.fromkeys(CLASS_NAMES, 0.0),
+                        "error": str(e)
+                    })
             
-            # Predict with batch size 1 for memory efficiency
-            prediction = await asyncio.get_event_loop().run_in_executor(
-                app.state.executor,
-                lambda: app.state.model.predict(
-                    [np.expand_dims(full_img, axis=0), 
-                    np.expand_dims(face_img, axis=0)],
-                    verbose=0,
-                    batch_size=1
-                )[0]
-            )
-            
-            # Ensure prediction is valid
-            if prediction is not None and len(prediction) == len(CLASS_NAMES):
-                # Format results
-                result.update({
-                    "class": CLASS_NAMES[np.argmax(prediction)],
-                    "confidence": float(np.max(prediction)),
-                    "probabilities": {name: float(p) for name, p in zip(CLASS_NAMES, prediction)}
-                })
-            else:
-                raise ValueError("Invalid prediction result from model")
-            
-        except Exception as e:
-            result.update({
-                "error": str(e),
-                "class": "ERROR",
-                "confidence": 0.0,
-                "probabilities": {name: 0.0 for name in CLASS_NAMES}
-            })
-            logger.error(f"Error processing {file.filename}: {str(e)}", exc_info=True)
-            
+            # Batch prediction
+            if batch_inputs[0]:  # If we have valid inputs
+                predictions = await asyncio.get_event_loop().run_in_executor(
+                    app.state.executor,
+                    lambda: app.state.model.predict(
+                        [np.array(batch_inputs[0]), np.array(batch_inputs[1])],
+                        verbose=0,
+                        batch_size=BATCH_SIZE
+                    )
+                )
+                
+                for i, prediction in enumerate(predictions):
+                    if prediction is not None and len(prediction) == len(CLASS_NAMES):
+                        batch_results.append({
+                            "filename": batch_files[i].filename,
+                            "class": CLASS_NAMES[np.argmax(prediction)],
+                            "confidence": float(np.max(prediction)),
+                            "probabilities": dict(zip(CLASS_NAMES, prediction.astype(float).tolist())),
+                            "error": None
+                        })
+                    else:
+                        batch_results.append({
+                            "filename": batch_files[i].filename,
+                            "class": "ERROR",
+                            "confidence": 0.0,
+                            "probabilities": dict.fromkeys(CLASS_NAMES, 0.0),
+                            "error": "Invalid prediction result"
+                        })
+                        
         finally:
-            # Cleanup resources
-            resource_mgr.cleanup()
+            for resource_mgr in resource_mgrs:
+                resource_mgr.cleanup()
+            tf.keras.backend.clear_session()
             
-        return result
-    
-    # Process files sequentially to avoid memory spikes
-    results = []
-    for file in files:
-        results.append(await process_wrapper(file))
+        return batch_results
+
+    # Process in batches
+    for i in range(0, len(files), BATCH_SIZE):
+        batch = files[i:i+BATCH_SIZE]
+        batch_results = await process_batch(batch)
+        for j, result in enumerate(batch_results):
+            results[i+j] = result
     
     return results
 
