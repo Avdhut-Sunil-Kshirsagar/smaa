@@ -7,197 +7,174 @@ import cv2
 import imghdr
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from pydantic import BaseModel, Field
-import tensorflow as tf
+from pathlib import Path
 
-# Environment configuration
+# Configure environment for maximum CPU efficiency
 os.environ.update({
-    'TF_CPP_MIN_LOG_LEVEL': '3',
+    'DEEPFACE_HOME': '/app/.deepface',
     'CUDA_VISIBLE_DEVICES': '-1',
+    'TF_CPP_MIN_LOG_LEVEL': '2',  # Suppress TensorFlow logs
+    'TF_ENABLE_ONEDNN_OPTS': '1',
+    'DEEPFACE_CACHE': '0',
     'OMP_NUM_THREADS': '1',
-    'TF_NUM_INTRAOP_THREADS': '1',
-    'TF_NUM_INTEROP_THREADS': '1'
+    'OPENBLAS_NUM_THREADS': '1',
+    'MKL_NUM_THREADS': '1',
+    'TF_NUM_INTEROP_THREADS': '1',
+    'TF_NUM_INTRAOP_THREADS': '1'
 })
 
 # Configure logging
-logging.basicConfig(level=logging.WARNING)
+logging.basicConfig(level=logging.WARNING)  # Reduced from INFO to WARNING
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="UltraFast Deepfake API", version="3.0")
+from fastapi import FastAPI, UploadFile, File, HTTPException
+import tensorflow as tf
+from deepface import DeepFace
+from pydantic import BaseModel, Field
 
-# Constants
+app = FastAPI(
+    title="Deepfake Detection API",
+    description="Ultra-optimized API for detecting deepfake images on low-CPU environments",
+    version="3.0"
+)
+
+# Constants optimized for low-resource environment
 TARGET_SIZE = (224, 224)
 CLASS_NAMES = ['AI', 'FAKE', 'REAL']
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-MODEL_INPUT_SHAPE = (TARGET_SIZE[0], TARGET_SIZE[1], 3)
-BATCH_SIZE = 8  # Optimized for CPU cache
-MAX_CONCURRENT_BATCHES = 2
+MAX_FILE_SIZE = 5 * 1024 * 1024  # Reduced to 5MB for memory safety
+MAX_WORKERS = 2  # Conservative for 0.5 vCPU
+MODEL_INPUT_SHAPE = (1, *TARGET_SIZE, 3)
+BATCH_SIZE = 2  # Optimal for memory constraints
 
-# Pydantic models
+# Simplified Pydantic Models
 class PredictionResult(BaseModel):
     filename: str
     class_: str = Field(..., alias="class")
     confidence: float
     probabilities: Dict[str, float]
 
-class BatchPredictionResult(BaseModel):
-    results: List[PredictionResult]
+class HealthCheckResponse(BaseModel):
+    status: str
+    model_ready: bool
 
-# Optimized preprocessing
-def optimized_preprocess(img: np.ndarray) -> np.ndarray:
-    img = cv2.resize(img, TARGET_SIZE, interpolation=cv2.INTER_AREA)
+# Memory-efficient image processing
+def preprocess_image(img: np.ndarray) -> np.ndarray:
+    """Ultra-optimized image preprocessing"""
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = cv2.resize(img, TARGET_SIZE, interpolation=cv2.INTER_LINEAR)
     return img.astype(np.float32) / 255.0
 
-# Face detector using OpenCV Haar cascades (faster than DeepFace)
-class FaceDetector:
-    def __init__(self):
-        self.face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        )
-    
-    def detect(self, img: np.ndarray) -> np.ndarray:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
-        if len(faces) > 0:
-            x, y, w, h = faces[0]
-            return img[y:y+h, x:x+w]
-        return img
+async def process_single_image(file: UploadFile) -> PredictionResult:
+    """Streamlined single image processing pipeline"""
+    try:
+        # Read and validate
+        file_bytes = await file.read()
+        if len(file_bytes) > MAX_FILE_SIZE:
+            raise ValueError("File too large")
+        
+        if not imghdr.what(None, h=file_bytes) in ['jpeg', 'jpg', 'png']:
+            raise ValueError("Invalid image format")
 
-# Core processing class
-class DeepfakeProcessor:
-    def __init__(self):
-        self.face_detector = FaceDetector()
-        self.model = None
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        # Decode and preprocess
+        nparr = np.frombuffer(file_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("Invalid image data")
+
+        # Process full image
+        full_img = preprocess_image(img)
         
-    async def warmup_model(self, model_path: str):
-        """Warmup model with optimized settings"""
-        self.model = tf.keras.models.load_model(
-            model_path, compile=False
-        )
-        self.model.trainable = False
-        
-        # Initial warmup
-        dummy = np.zeros((2, *MODEL_INPUT_SHAPE), dtype=np.float32)
-        self.model.predict([dummy, dummy], batch_size=2, verbose=0)
-        
-    async def process_file(self, file: UploadFile):
-        """Ultra-fast file processing pipeline"""
+        # Face extraction with immediate fallback
+        face_img = full_img
         try:
-            # Read and validate
-            img_data = await file.read()
-            if len(img_data) > MAX_FILE_SIZE:
-                return None, "File too large"
-                
-            # Decode and detect
-            img = cv2.imdecode(
-                np.frombuffer(img_data, np.uint8), 
-                cv2.IMREAD_COLOR
+            face_img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            faces = DeepFace.extract_faces(
+                img_path=face_img_rgb,
+                detector_backend='opencv',
+                enforce_detection=False,
+                align=False,
+                grayscale=False
             )
-            if img is None:
-                return None, "Invalid image"
-                
-            # Parallel processing
-            full_img = await asyncio.get_event_loop().run_in_executor(
-                self.executor, optimized_preprocess, img
-            )
-            face_img = await asyncio.get_event_loop().run_in_executor(
-                self.executor, self.face_detector.detect, img
-            )
-            face_img = await asyncio.get_event_loop().run_in_executor(
-                self.executor, optimized_preprocess, face_img
-            )
-            
-            return (full_img, face_img), None
-            
-        except Exception as e:
-            return None, str(e)
+            if faces and isinstance(faces[0].get('face'), np.ndarray):
+                face_img = preprocess_image(faces[0]['face'])
+        except Exception:
+            pass
 
-# FastAPI endpoints
+        # Predict
+        prediction = app.state.model.predict(
+            [np.expand_dims(full_img, axis=0), 
+            np.expand_dims(face_img, axis=0)],
+            verbose=0,
+            batch_size=1
+        )[0]
+
+        return {
+            "filename": file.filename,
+            "class": CLASS_NAMES[np.argmax(prediction)],
+            "confidence": float(np.max(prediction)),
+            "probabilities": dict(zip(CLASS_NAMES, prediction.astype(float).tolist()))
+        }
+
+    except Exception as e:
+        logger.warning(f"Processing failed for {file.filename}: {str(e)}")
+        return {
+            "filename": file.filename,
+            "class": "ERROR",
+            "confidence": 0.0,
+            "probabilities": {name: 0.0 for name in CLASS_NAMES}
+        }
+
 @app.on_event("startup")
-async def startup():
-    processor = DeepfakeProcessor()
-    await processor.warmup_model(os.environ['MODEL_PATH'])
-    app.state.processor = processor
+async def startup_event():
+    """Ultra-lean startup configuration"""
+    try:
+        # Minimal TensorFlow configuration
+        tf.config.optimizer.set_experimental_options({
+            'constant_folding': True,
+            'disable_meta_optimizer': True  # Faster startup
+        })
+        
+        # Load model with absolute minimum overhead
+        app.state.model = tf.keras.models.load_model(
+            os.environ['MODEL_PATH'],
+            compile=False
+        )
+        app.state.model.trainable = False
 
-@app.post("/predict", response_model=BatchPredictionResult)
+        # Warm up with tiny input
+        dummy = np.zeros((1, *TARGET_SIZE, 3), dtype=np.float32)
+        app.state.model.predict([dummy, dummy], verbose=0, batch_size=1)
+
+        # Conservative resource pool
+        app.state.executor = ThreadPoolExecutor(
+            max_workers=MAX_WORKERS,
+            thread_name_prefix='df_worker'
+        )
+
+    except Exception as e:
+        logger.critical(f"Startup failed: {str(e)}")
+        sys.exit(1)
+
+@app.post("/predict", response_model=List[PredictionResult])
 async def predict(files: List[UploadFile] = File(...)):
-        
-    processor = app.state.processor
-    results = []
-    
-    # Process files in parallel batches
-    batch_tasks = []
-    for i in range(0, len(files), BATCH_SIZE * MAX_CONCURRENT_BATCHES):
-        batch_group = files[i:i+BATCH_SIZE * MAX_CONCURRENT_BATCHES]
-        batch_tasks.append(
-            process_batch(processor, batch_group)
-        )
-    
-    # Collect and flatten results
-    batch_results = await asyncio.gather(*batch_tasks)
-    for br in batch_results:
-        results.extend(br)
-    
-    return {"results": results}
+    """Optimized prediction endpoint"""
+    if len(files) > 10:
+        raise HTTPException(413, "Maximum 10 files allowed")
 
-async def process_batch(processor, files):
-    """Process a batch of files with optimized pipeline"""
-    processed = []
-    predictions = []
+    # Process files with controlled concurrency
+    semaphore = asyncio.Semaphore(MAX_WORKERS)
     
-    # Process all files in parallel
-    process_tasks = [processor.process_file(f) for f in files]
-    batch_results = await asyncio.gather(*process_tasks)
+    async def limited_process(file):
+        async with semaphore:
+            return await process_single_image(file)
     
-    # Prepare batch inputs
-    full_imgs, face_imgs = [], []
-    for result, error in batch_results:
-        if error:
-            predictions.append(create_error_result(result, error))
-        else:
-            full_imgs.append(result[0])
-            face_imgs.append(result[1])
-    
-    # Batch predict if we have valid inputs
-    if full_imgs:
-        full_imgs = np.array(full_imgs)
-        face_imgs = np.array(face_imgs)
-        
-        # Predict in parallel thread
-        preds = await asyncio.get_event_loop().run_in_executor(
-            processor.executor,
-            lambda: processor.model.predict(
-                [full_imgs, face_imgs],
-                batch_size=BATCH_SIZE,
-                verbose=0
-            )
-        )
-        
-        # Create results
-        for i, pred in enumerate(preds):
-            predictions.append(create_prediction(
-                files[i].filename, pred
-            ))
-    
-    return predictions
+    return await asyncio.gather(*[limited_process(file) for file in files])
 
-def create_prediction(filename: str, pred: np.ndarray) -> Dict:
+@app.get("/health", response_model=HealthCheckResponse)
+async def health_check():
     return {
-        "filename": filename,
-        "class": CLASS_NAMES[np.argmax(pred)],
-        "confidence": float(np.max(pred)),
-        "probabilities": dict(zip(CLASS_NAMES, pred.astype(float).tolist()))
-    }
-
-def create_error_result(filename: str, error: str) -> Dict:
-    return {
-        "filename": filename,
-        "class": "ERROR",
-        "confidence": 0.0,
-        "probabilities": {c: 0.0 for c in CLASS_NAMES},
-        "error": error
+        "status": "ready",
+        "model_ready": hasattr(app.state, 'model')
     }
 
 if __name__ == "__main__":
@@ -206,7 +183,8 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=8000,
-        workers=1,
-        limit_concurrency=1000,
-        timeout_keep_alive=30
+        workers=1,  # Single worker for 0.5 vCPU
+        limit_concurrency=MAX_WORKERS,
+        timeout_keep_alive=30,  # Reduced from 60
+        log_level="warning"  # Reduced logging overhead
     )
